@@ -158,6 +158,7 @@ export class Session {
     this.playerName = meta.playerName;
     this.shipNames = new Map(meta.shipNames);
     this.convoyNames = new Map(meta.convoyNames);
+    this.nameCounter = this.convoyNames.size;
     this.selected = this.playerConvoys()[0] ?? -1;
     this.core.drainEvents();
     return true;

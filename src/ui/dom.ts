@@ -32,14 +32,14 @@ export function fmt(n: number): string {
 }
 
 /** Modal window on parchment. Returns the window element and a close function. */
-export function modal(title: string, body: Node, opts: { footer?: Node[]; onClose?: () => void; width?: number; plain?: boolean } = {}) {
+export function modal(title: string, body: Node, opts: { footer?: Node[]; onClose?: () => void; width?: number; plain?: boolean; fancy?: boolean } = {}) {
   const close = () => {
     overlay.remove();
     opts.onClose?.();
   };
   const win = h(
     'div',
-    { class: `window parchment ${opts.plain ? 'plain' : ''}`, style: opts.width ? `width:${opts.width}px` : undefined },
+    { class: `window parchment ${opts.fancy ? '' : 'plain'}`, style: opts.width ? `width:${opts.width}px` : undefined },
     h('header', null, h('h2', null, title), h('button', { class: 'btn small close', onclick: close }, '✕')),
     h('div', { class: 'body' }, body),
     opts.footer?.length ? h('footer', null, ...opts.footer) : null,
