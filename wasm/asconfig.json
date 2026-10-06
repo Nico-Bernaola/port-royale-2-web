@@ -1,0 +1,22 @@
+{
+  "targets": {
+    "debug": {
+      "outFile": "../src/wasm/build/core.wasm",
+      "textFile": "../src/wasm/build/core.wat",
+      "sourceMap": true,
+      "debug": true
+    },
+    "release": {
+      "outFile": "../src/wasm/build/core.wasm",
+      "optimizeLevel": 3,
+      "shrinkLevel": 0,
+      "converge": false,
+      "noAssert": true
+    }
+  },
+  "options": {
+    "runtime": "stub",
+    "initialMemory": 512,
+    "exportRuntime": false
+  }
+}
