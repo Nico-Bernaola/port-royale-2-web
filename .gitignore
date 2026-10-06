@@ -1,0 +1,9 @@
+node_modules/
+dist/
+# Extracted game assets are copyrighted: generate them locally with `npm run extract`.
+public/game/
+# Generated WASM build output
+src/wasm/build/
+__pycache__/
+*.log
+.DS_Store
