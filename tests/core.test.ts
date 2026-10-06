@@ -96,12 +96,12 @@ test('player convoy sails to another town and docks', { skip: !ready }, async ()
   const pr = town(data, 'Port Royale'), dest = town(data, 'Santiago');
   const { convoy } = newGame(core, data, { startTown: pr.id, gold: 10000, ships: [{ type: 0, name: 'P' }] });
   assert.ok(core.x.sailToTown(convoy, dest.id));
-  assert.equal(core.s.cvState[convoy], CvState.Sailing);
+  assert.equal(core.s.cvState[convoy] as number, CvState.Sailing);
   let arrived = false;
   for (let i = 0; i < 400 && !arrived; i++) {
     core.x.tick(0.05);
     for (const e of core.drainEvents()) if (e.type === Ev.Arrived && e.a === convoy) arrived = true;
-    if (core.s.cvState[convoy] === CvState.Halted) core.x.autoResolve(convoy, -1);
+    if ((core.s.cvState[convoy] as number) === CvState.Halted) core.x.autoResolve(convoy, -1);
   }
   assert.ok(arrived, 'arrived');
   assert.equal(core.s.cvTown[convoy], dest.id);

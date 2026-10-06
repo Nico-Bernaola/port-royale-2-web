@@ -278,10 +278,29 @@ async function extractSeaMap(): Promise<void> {
 
 async function extractShips(): Promise<void> {
   step('ship sprites');
+  // each sheet: 4x4 cells of 100 px, one per heading. Ships are drawn at their relative size,
+  // so record the largest opaque extent per sheet to let the renderer normalise them.
+  const extents: Record<string, number> = {};
   for (const n of files.list((n) => n.startsWith('images/schiffstypen/'))) {
     const id = n.split('/').pop()!.slice(0, 2);
-    await saveImage(await loadImage(n), `ships/${id}.webp`, { quality: 92 });
+    const img = await loadImage(n);
+    let ext = 0;
+    for (let cell = 0; cell < 16; cell++) {
+      const cx = (cell % 4) * 100, cy = Math.floor(cell / 4) * 100;
+      let x0 = 100, y0 = 100, x1 = -1, y1 = -1;
+      for (let y = 0; y < 100; y++) {
+        for (let x = 0; x < 100; x++) {
+          if (img.data[((cy + y) * img.width + cx + x) * 4 + 3] > 40) {
+            x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+          }
+        }
+      }
+      if (x1 >= 0) ext = Math.max(ext, x1 - x0 + 1, y1 - y0 + 1);
+    }
+    extents[String(Number(id))] = ext;
+    await saveImage(img, `ships/${id}.webp`, { quality: 92 });
   }
+  writeJson('ships/extents.json', extents);
 }
 
 const UI_IMAGES: Record<string, string> = {
@@ -312,6 +331,13 @@ async function extractUi(): Promise<void> {
     if (!files.tryGet(src)) continue;
     await saveImage(await loadImage(src), dst, { quality: 90 });
   }
+  for (const [src, dst] of [['fonts/Tiepolo_bold.ttf', 'tiepolo-bold.ttf'], ['fonts/Tiepolo_black.ttf', 'tiepolo-black.ttf'], ['fonts/ELGRECO_.TTF', 'elgreco.ttf']]) {
+    const b = files.tryGet(src);
+    if (b) {
+      writeFileSync(outPath(`fonts/${dst}`), b);
+      written++;
+    }
+  }
   for (const n of files.list((n) => n.startsWith('images/interface/piraten/'))) {
     await saveImage(await loadImage(n), `ui/pirates/${n.split('/').pop()!.replace(/\.aim$/i, '.webp')}`);
   }
@@ -335,7 +361,6 @@ const TOWN_SPRITES = [
   'Fruechte_Bananenpalme_A', 'Fruechte_Bananenpalme_B', 'Fruechte_Orangenbaum_A', 'Bananenpalme_Busch01', 'Bananenpalme_Busch02',
   'Busch01', 'Busch03', 'Busch05', 'Busch07', 'Busch09', 'Busch11', 'Fels01', 'Fels03', 'Fels05', 'Kaktus01',
   'Faesser01_1x1', 'Kisten02_1x1', 'Ballen01_1x1', 'Holzstapel01_1x1', 'Ruderboot01_1x2', 'Wagen01_1x2', 'Laterne01_1x1',
-  'Flagge_England', 'Flagge_Frankreich', 'Flagge_Holland', 'Flagge_Spanien',
 ];
 
 async function extractTown(): Promise<void> {
@@ -350,6 +375,8 @@ async function extractTown(): Promise<void> {
     if (shdName) {
       // composite the shadow underneath (shadows are drawn first in the original renderer)
       const shd = await loadImage(shdName);
+      // shadow images are binary masks (black, alpha 0/255): draw them translucent
+      for (let i = 3; i < shd.data.length; i += 4) shd.data[i] = Math.round(shd.data[i] * 0.42);
       const merged = blankImage(full.width, full.height);
       blit(merged, shd, 0, 0);
       for (let i = 0; i < full.data.length; i += 4) {

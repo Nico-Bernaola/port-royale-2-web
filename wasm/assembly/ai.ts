@@ -81,8 +81,8 @@ export function spawnPirate(): i32 {
     const s = createShip(type, OWNER_PIRATE, -1);
     if (s >= 0) {
       addShipToConvoy(s, c);
-      unchecked((shCannons[s] = Math.floor(unchecked(typeGuns[type]) * (0.6 + rand() * 0.4))));
-      unchecked((shCrew[s] = Math.floor(unchecked(typeCrew[type]) * (0.7 + rand() * 0.3))));
+      unchecked((shCannons[s] = Math.floor(unchecked(typeGuns[type]) * (0.5 + rand() * 0.35))));
+      unchecked((shCrew[s] = Math.floor(unchecked(typeCrew[type]) * (0.6 + rand() * 0.3))));
     }
   }
   unchecked((cvHome[c * 2] = unchecked(hideoutX[h])));

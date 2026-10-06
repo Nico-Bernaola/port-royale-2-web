@@ -23,7 +23,7 @@ const DMG_SAIL: StaticArray<f64> = [6552.0 / 65536.0, 6552.0 / 65536.0, 98304.0 
 const DMG_HULL: StaticArray<f64> = [65536.0 / 65536.0, 19660.0 / 65536.0, 13107.0 / 65536.0];
 const DMG_CREW: StaticArray<f64> = [19660.0 / 65536.0, 52428.0 / 65536.0, 6552.0 / 65536.0];
 const AMMO_RANGE: StaticArray<f64> = [430.0, 260.0, 330.0];
-const DAMAGE_SCALE: f64 = 2.6;
+const DAMAGE_SCALE: f64 = 5.0;
 
 // flags
 export const BF_SUNK: i32 = 1;
@@ -67,7 +67,7 @@ export const ballOwner = new StaticArray<i32>(MAX_BALLS);
 export let battleTime: f64 = 0;
 export let battleOver: i32 = -1; // -1 running, 0 player won, 1 enemy won, 2 player escaped
 
-const BALL_SPEED: f64 = 240.0;
+const BALL_SPEED: f64 = 320.0;
 
 export function battleBegin(): void {
   bsCount = 0;
@@ -132,7 +132,7 @@ function maxSpeed(i: i32): f64 {
   const knots = vmin + (vmax - vmin) * wf;
   const sailCond = 0.3 + 0.7 * unchecked(bsSails[i]) / 100.0;
   const crewFactor = 0.6 + 0.4 * Math.min(1.0, unchecked(bsCrew[i]) / Math.max(1.0, unchecked(typeCrew[t]) * 0.5));
-  return knots * 5.5 * unchecked(bsSail[i]) * sailCond * crewFactor;
+  return knots * 3.8 * unchecked(bsSail[i]) * sailCond * crewFactor;
 }
 
 function steer(i: i32, dt: f64): void {
@@ -145,10 +145,11 @@ function steer(i: i32, dt: f64): void {
   let dh = target - unchecked(bsHeading[i]);
   while (dh > Math.PI) dh -= 2.0 * Math.PI;
   while (dh < -Math.PI) dh += 2.0 * Math.PI;
-  // turn rate: BattleConst [Rotation] R1 (10 deg/s) scaled by agility and speed
+  // turn rate: BattleConst [Rotation] R1 (10 deg/s) at full agility, doubled because battle
+  // time runs compressed relative to the original; ships need steerage way to turn
   const vmax = Math.max(1.0, maxSpeed(i));
-  const speedRatio = Math.min(1.0, unchecked(bsSpeed[i]) / Math.max(20.0, vmax));
-  const rate = 0.1745 * unchecked(typeAgility[t]) / 100.0 * (0.35 + 0.65 * speedRatio);
+  const speedRatio = Math.min(1.0, unchecked(bsSpeed[i]) / Math.max(15.0, vmax));
+  const rate = 0.1745 * 2.0 * unchecked(typeAgility[t]) / 100.0 * (0.35 + 0.65 * speedRatio);
   const turn = Math.max(-rate * dt, Math.min(rate * dt, dh));
   unchecked((bsHeading[i] += turn));
   // accelerate towards the speed allowed by sails and wind; slow down near the target point
@@ -180,7 +181,7 @@ function fire(i: i32, side: i32): void {
   for (let b = 0; b < MAX_BALLS && spawned < guns; b++) {
     if (unchecked(ballLife[b]) > 0) continue;
     const along = (<f64>spawned / Math.max(1.0, <f64>(guns - 1)) - 0.5) * len * 0.7;
-    const spread = (rand() - 0.5) * 0.12;
+    const spread = (rand() - 0.5) * 0.08;
     const d = dir + spread;
     const speed = BALL_SPEED * (0.92 + rand() * 0.16);
     unchecked((ballX[b] = unchecked(bsX[i]) + Math.cos(h) * along + Math.cos(dir) * 8.0));
@@ -234,7 +235,7 @@ function nearestEnemy(i: i32): i32 {
 }
 
 function autoFire(i: i32): void {
-  const range = unchecked(AMMO_RANGE[unchecked(bsAmmo[i])]) * 0.92;
+  const range = unchecked(AMMO_RANGE[unchecked(bsAmmo[i])]) * 0.8;
   for (let j = 0; j < bsCount; j++) {
     if (!active(j) || unchecked(bsSide[j]) == unchecked(bsSide[i])) continue;
     const dx = unchecked(bsX[j]) - unchecked(bsX[i]);
@@ -244,6 +245,22 @@ function autoFire(i: i32): void {
     if (s < 0 && unchecked(bsReloadL[i]) <= 0) fire(i, -1);
     else if (s > 0 && unchecked(bsReloadR[i]) <= 0) fire(i, 1);
   }
+}
+
+/** Bend a desired heading away from the arena border (ships that are not fleeing stay in). */
+function avoidEdges(i: i32, goal: f64): f64 {
+  const m: f64 = 260.0;
+  const x = unchecked(bsX[i]);
+  const y = unchecked(bsY[i]);
+  let px: f64 = 0;
+  let py: f64 = 0;
+  if (x < m) px = (m - x) / m;
+  else if (x > ARENA_W - m) px = -(x - (ARENA_W - m)) / m;
+  if (y < m) py = (m - y) / m;
+  else if (y > ARENA_H - m) py = -(y - (ARENA_H - m)) / m;
+  if (px == 0 && py == 0) return goal;
+  const w: f64 = 2.5;
+  return Math.atan2(Math.sin(goal) + py * w, Math.cos(goal) + px * w);
 }
 
 /** Tactical AI: close in, present a loaded broadside, flee when beaten, board when stronger. */
@@ -266,8 +283,10 @@ function think(i: i32): void {
     unchecked((bsSail[i] = 1.0));
     return;
   }
-  // board (AEntCond 1.1) when much stronger in crew and close
-  if (crewRatio > 1.4 && unchecked(bsCrew[i]) > unchecked(typeCrew[t]) * 0.3) {
+  // board (AEntCond 1.1) when much stronger in crew and the prey has been softened up
+  const et = unchecked(bsType[e]);
+  const preyWeak = unchecked(bsHull[e]) < unchecked(bsHullMax[e]) * 0.4 || unchecked(bsCrew[e]) < unchecked(typeCrew[et]) * 0.2;
+  if (crewRatio > 1.8 && preyWeak && unchecked(bsCrew[i]) > unchecked(typeCrew[t]) * 0.3) {
     unchecked((bsTargetX[i] = ex));
     unchecked((bsTargetY[i] = ey));
     unchecked((bsSail[i] = 1.0));
@@ -275,23 +294,25 @@ function think(i: i32): void {
     return;
   }
   const range = unchecked(AMMO_RANGE[unchecked(bsAmmo[i])]);
-  const ideal = range * 0.55;
+  // outnumbered crews keep the enemy at arm's length to avoid being boarded
+  const ideal = range * (crewRatio < 0.75 ? 0.75 : 0.5);
   const bearing = Math.atan2(dy, dx);
   let goal: f64;
-  if (d > range * 0.9) {
+  if (d > range * 1.15) {
     goal = bearing; // close in
   } else {
-    // sail perpendicular to the bearing, choosing the side whose guns are loaded
+    // orbit the enemy at gun range, presenting the broadside that is loaded (or nearly so)
     const useRight = unchecked(bsReloadR[i]) <= unchecked(bsReloadL[i]);
-    goal = bearing + (useRight ? -Math.PI * 0.5 : Math.PI * 0.5);
-    // drift in or out towards the ideal distance
-    goal += (d > ideal ? 0.35 : -0.35) * (useRight ? 1.0 : -1.0);
+    const err = Math.max(-1.0, Math.min(1.0, (d - ideal) / ideal));
+    const off = Math.PI * 0.5 - err * 0.75; // < 90 deg: spiral in, > 90 deg: open the range
+    goal = bearing + (useRight ? -off : off);
   }
+  goal = avoidEdges(i, goal);
   unchecked((bsTargetX[i] = unchecked(bsX[i]) + Math.cos(goal) * 250.0));
   unchecked((bsTargetY[i] = unchecked(bsY[i]) + Math.sin(goal) * 250.0));
-  unchecked((bsSail[i] = d > range ? 1.0 : 0.75));
+  unchecked((bsSail[i] = d > range ? 1.0 : 0.7));
   // pick ammunition: chain at long range against fast ships, grape when close, else round shot
-  if (d < 200.0 && unchecked(bsCrew[e]) > unchecked(bsCrew[i]) * 0.7) unchecked((bsAmmo[i] = AMMO_GRAPE));
+  if (d < 180.0 && unchecked(bsCrew[e]) > unchecked(bsCrew[i]) * 0.9) unchecked((bsAmmo[i] = AMMO_GRAPE));
   else if (unchecked(bsSails[e]) > 70.0 && rand() < 0.002) unchecked((bsAmmo[i] = AMMO_CHAIN));
   else unchecked((bsAmmo[i] = AMMO_ROUND));
 }
@@ -335,7 +356,8 @@ function hit(b: i32, j: i32): void {
   const k = DAMAGE_SCALE * (0.7 + rand() * 0.6);
   unchecked((bsHull[j] -= unchecked(DMG_HULL[ammo]) * k));
   unchecked((bsSails[j] = Math.max(0.0, unchecked(bsSails[j]) - unchecked(DMG_SAIL[ammo]) * k * 1.6)));
-  unchecked((bsCrew[j] = Math.max(0.0, unchecked(bsCrew[j]) - unchecked(DMG_CREW[ammo]) * k * (rand() < 0.6 ? 1.0 : 0.0))));
+  // crew casualties: half the hull-scale damage, and not every hit kills someone
+  unchecked((bsCrew[j] = Math.max(0.0, unchecked(bsCrew[j]) - Math.floor(unchecked(DMG_CREW[ammo]) * k * 0.5 + rand()))));
   if (ammo == AMMO_ROUND && rand() < 0.04) unchecked((bsCannons[j] = Math.max(0.0, unchecked(bsCannons[j]) - 1.0)));
   pushEvent(EV_BATTLE_HIT, <f64>j, <f64>ammo);
   if (unchecked(bsHull[j]) <= 0) {
@@ -360,16 +382,25 @@ function stepBalls(dt: f64): void {
     for (let j = 0; j < bsCount; j++) {
       if (!active(j) || unchecked(bsSide[j]) == unchecked(ballSide[b])) continue;
       const h = unchecked(bsHeading[j]);
-      const rx = x1 - unchecked(bsX[j]);
-      const ry = y1 - unchecked(bsY[j]);
-      const lx = rx * Math.cos(h) + ry * Math.sin(h);
-      const ly = -rx * Math.sin(h) + ry * Math.cos(h);
+      const ch = Math.cos(h);
+      const sh = Math.sin(h);
       const a = unchecked(bsLength[j]) * 0.5;
       const w = a * 0.32;
-      if ((lx * lx) / (a * a) + (ly * ly) / (w * w) <= 1.0) {
+      // swept test along this step's path so fast shots cannot tunnel through a narrow hull
+      for (let k = 1; k <= 4; k++) {
+        const f = <f64>k / 4.0;
+        const rx = x0 + (x1 - x0) * f - unchecked(bsX[j]);
+        const ry = y0 + (y1 - y0) * f - unchecked(bsY[j]);
+        const lx = rx * ch + ry * sh;
+        const ly = -rx * sh + ry * ch;
+        if ((lx * lx) / (a * a) + (ly * ly) / (w * w) <= 1.0) {
+          struck = true;
+          break;
+        }
+      }
+      if (struck) {
         hit(b, j);
         unchecked((ballLife[b] = 0));
-        struck = true;
         break;
       }
     }
@@ -423,7 +454,14 @@ export function battleStep(dt: f64): void {
     const m: f64 = 60.0;
     const x = unchecked(bsX[i]);
     const y = unchecked(bsY[i]);
-    if (x < -m || y < -m || x > ARENA_W + m || y > ARENA_H + m) unchecked((bsFlags[i] |= BF_ESCAPED));
+    if (x < -m || y < -m || x > ARENA_W + m || y > ARENA_H + m) {
+      // only fleeing or player-steered ships can leave; anything else is turned back
+      if ((unchecked(bsFlags[i]) & BF_FLEEING) != 0 || unchecked(bsManual[i]) != 0) unchecked((bsFlags[i] |= BF_ESCAPED));
+      else {
+        unchecked((bsTargetX[i] = ARENA_W * 0.5));
+        unchecked((bsTargetY[i] = ARENA_H * 0.5));
+      }
+    }
   }
   separate();
   stepBalls(dt);

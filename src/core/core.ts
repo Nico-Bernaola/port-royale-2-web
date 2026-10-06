@@ -113,7 +113,7 @@ const P = {
 } as const;
 
 export interface CoreEvent {
-  type: Ev;
+  type: number;
   a: number;
   b: number;
 }
