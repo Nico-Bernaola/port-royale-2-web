@@ -1,8 +1,9 @@
 /** Port dialogs: shipyard (buy, repair, arm, sell ships) and harbour master (fleet management). */
 import { audio } from '../audio.ts';
-import { shipSheetUrl } from '../assets.ts';
 import { Owner } from '../core/core.ts';
 import type { ShipDef } from '../core/data.ts';
+import { type ShipClass, buildMaterials } from '../data/world.ts';
+import { shipThumbnail } from '../render/ships3d.ts';
 import { fmt, h, modal, toast } from './dom.ts';
 import type { PortContext } from './market.ts';
 
@@ -10,21 +11,21 @@ const CANNON_PRICE = 350;
 const CANNON_RESALE = 150;
 const CANNON_SPACE = 3;
 
-/** Ship types a town's shipyard builds, by town rank. */
+/** Ship classes a town's shipyard can build, by town rank. */
 function shipsForSale(rank: string, ships: ShipDef[]): ShipDef[] {
-  const colony = [0, 1, 2, 3, 5];
-  const governor = [...colony, 6, 7, 8, 11, 12, 13];
-  const ids = rank === 'colony' ? colony : rank === 'governor' ? governor : ships.map((s) => s.id).filter((id) => id !== 4 && id !== 16);
-  return ids.map((i) => ships[i]).filter(Boolean);
+  const keys = rank === 'colony' ? ['pinnace', 'sloop', 'brig', 'barque', 'fluyt']
+    : rank === 'governor' ? ['pinnace', 'sloop', 'brig', 'barque', 'fluyt', 'merchantman', 'corvette', 'frigate']
+      : ships.filter((s) => s.key !== 'raider').map((s) => s.key);
+  return keys.map((k) => ships.find((s) => s.key === k)!).filter(Boolean);
 }
 
+/** Ready-built ships cost more than commissioning one. */
+const READY_MARKUP = 1.35;
+
 export function shipPicture(type: number, size = 100): HTMLElement {
-  // frame 4 of the 16-heading sheet (row 1, column 0) is a nice three-quarter view
-  const scale = size / 100;
-  return h('div', {
-    class: 'pic',
-    style: `width:${size}px;height:${size * 0.8}px;background-image:url('${shipSheetUrl(type)}');background-size:${512 * scale}px ${512 * scale}px;background-position:0 ${-100 * scale - 10 * scale}px`,
-  });
+  const img = h('img', { class: 'pic', width: size, height: Math.round(size * 0.75), alt: '' }) as HTMLImageElement;
+  void shipThumbnail(type).then((url) => { img.src = url; });
+  return img;
 }
 
 function stats(t: ShipDef): HTMLElement {
@@ -48,28 +49,76 @@ export function openShipyard(ctx: PortContext): void {
   const core = s.core;
   const data = s.data;
   const town = data.towns[ctx.town];
-  let tab: 'buy' | 'repair' | 'arm' | 'sell' = 'buy';
+  let tab: 'build' | 'buy' | 'repair' | 'arm' | 'sell' = 'build';
   const tabs = h('div', { class: 'row', style: 'margin-bottom:10px' });
   const body = h('div', { style: 'width:680px;min-height:360px' });
   const gold = () => h('div', { style: 'margin-bottom:6px' }, '💰 ', h('b', null, fmt(core.x.gold())));
 
   const render = () => {
     tabs.replaceChildren(
-      ...(['buy', 'repair', 'arm', 'sell'] as const).map((k) =>
+      ...(['build', 'buy', 'repair', 'arm', 'sell'] as const).map((k) =>
         h('button', { class: `btn small ${tab === k ? 'active' : ''}`, onclick: () => { tab = k; render(); } },
-          { buy: 'Buy ships', repair: 'Repair', arm: 'Cannons', sell: 'Sell ships' }[k])));
-    if (tab === 'buy') body.replaceChildren(gold(), ...shipsForSale(town.rank, data.ships).map((t) => buyCard(t)));
+          { build: 'Commission a ship', buy: 'Buy ready-built', repair: 'Repair', arm: 'Cannons', sell: 'Sell ships' }[k])));
+    if (tab === 'build') body.replaceChildren(gold(), ...buildRows());
+    else if (tab === 'buy') body.replaceChildren(gold(), h('p', { class: 'muted' }, `Ships the yard has ready to sail away today, at ${Math.round((READY_MARKUP - 1) * 100)}% above the building price.`), ...shipsForSale(town.rank, data.ships).map((t) => buyCard(t)));
     else if (tab === 'repair') body.replaceChildren(gold(), ...repairRows());
     else if (tab === 'arm') body.replaceChildren(gold(), ...armRows());
     else body.replaceChildren(gold(), ...sellRows());
   };
 
+  // ---- commissioning: build time, labour and materials from the town's market
+  const G = core.MAX_GOODS;
+  const buildQuote = (t: ShipDef) => {
+    const mats = buildMaterials(t).map((m) => {
+      const inStock = Math.min(m.amount, Math.floor(core.stock(ctx.town, m.good)));
+      // materials the town lacks are shipped in at double the base price
+      const cost = core.x.quoteBuy(ctx.town, m.good, inStock) + (m.amount - inStock) * data.goods[m.good].basePrice * 2;
+      return { ...m, inStock, cost };
+    });
+    const labour = Math.round(t.price * 0.55);
+    const total = labour + mats.reduce((a, m) => a + m.cost, 0);
+    const days = (t as ShipClass).buildDays ?? 20;
+    return { mats, labour, total, days };
+  };
+  const buildRows = () => {
+    const busy = s.orders.find((o) => o.town === ctx.town);
+    const out: HTMLElement[] = [];
+    if (busy) {
+      const left = Math.max(0, Math.ceil(busy.readyDay - core.x.time()));
+      out.push(h('div', { class: 'parchment plain', style: 'padding:8px 12px;margin-bottom:10px' },
+        h('b', null, `On the slipway: ${busy.name} (${data.ships[busy.type].name})`),
+        h('div', { class: 'muted' }, `Ready on ${s.dateString(Math.ceil(busy.readyDay))} — ${left} day${left === 1 ? '' : 's'} to go. It will wait for you in the harbour.`)));
+    } else out.push(h('p', { class: 'muted' }, "The shipwrights build one ship at a time. Timber, rope and cloth are bought from this town's market — build where they are cheap."));
+    for (const t of shipsForSale(town.rank, data.ships)) {
+      const q = buildQuote(t);
+      const matText = q.mats.map((m) => `${m.amount} ${data.goods[m.good].name.toLowerCase()}${m.inStock < m.amount ? ' (short!)' : ''}`).join(', ');
+      out.push(h('div', { class: 'ship-card' }, shipPicture(t.id), h('div', { class: 'info' }, h('b', null, t.name), stats(t),
+        h('div', { class: 'muted', style: 'font-size:12px;margin-top:3px' }, `${q.days} days · materials: ${matText}`)),
+        h('div', { class: 'col', style: 'align-items:flex-end' }, h('b', null, `${fmt(q.total)} gold`),
+          h('button', {
+            class: 'btn small', disabled: !!busy || core.x.gold() < q.total, onclick: () => {
+              core.x.setGold(core.x.gold() - q.total);
+              for (const m of q.mats) core.s.townStock[ctx.town * G + m.good] -= m.inStock;
+              const names = ['Fortune', 'Hope', 'Swift', 'Albatross', 'Trinity', 'Valiant', 'Pelican', 'Marlin', 'Heron', 'Gull'];
+              const name = `${names[Math.floor(Math.random() * names.length)]} ${s.orders.length + s.shipNames.size + 1}`;
+              const now = core.x.time();
+              s.orders.push({ town: ctx.town, type: t.id, name, startDay: now, readyDay: now + q.days });
+              audio.sfx('click');
+              toast(`The keel of the ${name} is laid. Ready in ${q.days} days.`);
+              render();
+              ctx.changed();
+            },
+          }, busy ? 'Slipway busy' : 'Commission'))));
+    }
+    return out;
+  };
+
   const buyCard = (t: ShipDef) =>
     h('div', { class: 'ship-card' }, shipPicture(t.id), h('div', { class: 'info' }, h('b', null, t.name), stats(t)),
-      h('div', { class: 'col', style: 'align-items:flex-end' }, h('b', null, `${fmt(t.price)} gold`),
+      h('div', { class: 'col', style: 'align-items:flex-end' }, h('b', null, `${fmt(t.price * READY_MARKUP)} gold`),
         h('button', {
-          class: 'btn small', disabled: core.x.gold() < t.price, onclick: () => {
-            core.x.setGold(core.x.gold() - t.price);
+          class: 'btn small', disabled: core.x.gold() < t.price * READY_MARKUP, onclick: () => {
+            core.x.setGold(core.x.gold() - t.price * READY_MARKUP);
             const id = core.x.createShip(t.id, Owner.Player, ctx.town);
             if (id < 0) { toast('The harbour is full.'); return; }
             const c = ctx.active();

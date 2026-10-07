@@ -1,41 +1,21 @@
 /**
- * The sea map: the original painted Caribbean (20x15 tiles), an animated sea underneath it
- * (sea colour map + the game's water animation frames), convoys drawn with the 16-heading
- * ship sprite sheets, routes, clouds, and HTML town labels.
+ * The sea map, rendered in 3D: terrain and sea in one shader driven by the coastline's signed
+ * distance field (public/world/terrain.webp), procedural low-poly ships and towns, a tilted
+ * perspective camera, and HTML town labels.
  *
- * World units are map pixels with y pointing down; three.js coordinates are (x, -y).
+ * Map coordinates are pixels (x right, y down). World space: x = map x, z = map y, y = up.
  */
 import * as THREE from 'three';
-import { asset, fetchJson, flagUrl, texture } from '../assets.ts';
 import { CvState, Owner } from '../core/core.ts';
 import type { Session } from '../game/session.ts';
+import { flagUrl, worldUrl } from '../assets.ts';
 import { h, labelRoot } from '../ui/dom.ts';
+import { NOISE, SUN_DIR } from './glsl.ts';
+import { makeShip, shipLength } from './ships3d.ts';
+import { TerrainSampler } from './terrain.ts';
 
-const SPRITE_CELL = 100; // px per heading cell in the ship sheets
-const SHIP_SIZE = 100; // sheets are drawn 1:1 on the map, like the original
-
-/** Sprite frame for a heading (radians, 0 = east, clockwise on screen). See README. */
-export function headingFrame(heading: number): number {
-  const step = Math.PI / 8;
-  let i = Math.round(heading / step) + 2;
-  i = ((i % 16) + 16) % 16;
-  return i;
-}
-
-export function frameUv(frame: number): [number, number, number, number] {
-  const col = frame % 4;
-  const row = Math.floor(frame / 4);
-  const s = SPRITE_CELL / 512;
-  // texture v runs bottom-up
-  return [col * s, 1 - (row + 1) * s, (col + 1) * s, 1 - row * s];
-}
-
-interface ShipSprite {
-  mesh: THREE.Mesh;
-  geo: THREE.PlaneGeometry;
-  type: number;
-  frame: number;
-}
+const PITCH = (52 * Math.PI) / 180;
+const FOV = 38;
 
 export interface MapPick {
   kind: 'convoy' | 'town' | 'sea';
@@ -44,186 +24,218 @@ export interface MapPick {
   y: number;
 }
 
+interface ShipObj {
+  group: THREE.Group;
+  key: string;
+  nation: number;
+}
+
 export class SeaMapView {
   readonly scene = new THREE.Scene();
-  readonly camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1000, 1000);
+  readonly camera = new THREE.PerspectiveCamera(FOV, 1, 10, 30000);
   private session: Session;
   private renderer: THREE.WebGLRenderer;
-  private seaMat!: THREE.ShaderMaterial;
-  private shipMats = new Map<number, THREE.MeshBasicMaterial>();
-  /** largest opaque extent of each sheet's sprites (px), from the extractor */
-  private extents: Record<string, number> = {};
-  private sprites = new Map<number, ShipSprite>();
+  private terrainMat!: THREE.ShaderMaterial;
+  terrain!: TerrainSampler;
+  private ships = new Map<number, ShipObj>();
   private routeLine: THREE.Line;
   private selRing: THREE.Mesh;
   private targetMarker: THREE.Mesh;
-  private clouds: THREE.Mesh[] = [];
   private labels: HTMLElement[] = [];
   private time = 0;
-  /** camera centre (map px) and zoom (screen px per map px) */
+  private raycaster = new THREE.Raycaster();
+  private ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  /** camera target on the map and distance from it */
   cx = 2600;
   cy = 1900;
-  zoom = 0.6;
+  dist = 1400;
   readonly mapW: number;
   readonly mapH: number;
   visible = false;
+  onTownClick: ((town: number, button: number) => void) | null = null;
 
   constructor(renderer: THREE.WebGLRenderer, session: Session) {
     this.renderer = renderer;
     this.session = session;
     this.mapW = session.data.map.width;
     this.mapH = session.data.map.height;
-    this.scene.background = new THREE.Color(0x0a2a47);
+    this.scene.background = new THREE.Color(0x8fb8d0);
+    this.scene.fog = new THREE.Fog(0x9fc3d6, 4000, 16000);
+    const sun = new THREE.DirectionalLight(0xfff1d6, 2.2);
+    sun.position.set(SUN_DIR[0], SUN_DIR[1], SUN_DIR[2]).multiplyScalar(1000);
+    this.scene.add(sun, new THREE.HemisphereLight(0xcfe6ff, 0x4a5a3a, 1.1));
 
     const routeGeo = new THREE.BufferGeometry();
     routeGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(3 * 100), 3));
-    this.routeLine = new THREE.Line(
-      routeGeo,
-      new THREE.LineDashedMaterial({ color: 0xffe9a8, dashSize: 10, gapSize: 7, transparent: true, opacity: 0.9 }),
-    );
-    this.routeLine.renderOrder = 20;
+    this.routeLine = new THREE.Line(routeGeo, new THREE.LineDashedMaterial({ color: 0xfff3c4, dashSize: 14, gapSize: 9, transparent: true, opacity: 0.95, fog: false }));
+    this.routeLine.frustumCulled = false;
     this.scene.add(this.routeLine);
-
-    this.selRing = new THREE.Mesh(
-      new THREE.RingGeometry(30, 34, 48),
-      new THREE.MeshBasicMaterial({ color: 0xffd76a, transparent: true, opacity: 0.85 }),
-    );
-    this.selRing.renderOrder = 21;
-    this.selRing.visible = false;
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0xffd76a, transparent: true, opacity: 0.9, side: THREE.DoubleSide, fog: false });
+    this.selRing = new THREE.Mesh(new THREE.RingGeometry(0.8, 1, 48), ringMat);
+    this.selRing.rotation.x = -Math.PI / 2;
     this.scene.add(this.selRing);
-
-    this.targetMarker = new THREE.Mesh(
-      new THREE.RingGeometry(6, 9, 24),
-      new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.9 }),
-    );
-    this.targetMarker.renderOrder = 21;
-    this.targetMarker.visible = false;
+    this.targetMarker = new THREE.Mesh(new THREE.RingGeometry(6, 9, 24), ringMat);
+    this.targetMarker.rotation.x = -Math.PI / 2;
     this.scene.add(this.targetMarker);
   }
 
   async load(onProgress: (k: number) => void): Promise<void> {
-    const [shading, water, tiles] = await Promise.all([
-      texture('map/sea-shading.webp'),
-      texture('map/water-atlas.webp'),
-      fetchJson<string[]>('map/tiles.json'),
-    ]);
-    const atlas = await fetchJson<{ frames: number; cols: number; size: number }>('map/water-atlas.json');
-    this.extents = await fetchJson<Record<string, number>>('ships/extents.json').catch(() => ({}));
-    water.wrapS = water.wrapT = THREE.ClampToEdgeWrapping;
-    water.minFilter = THREE.LinearFilter;
-    water.generateMipmaps = false;
-    this.seaMat = new THREE.ShaderMaterial({
+    this.terrain = await TerrainSampler.load();
+    onProgress(0.5);
+    const tex = new THREE.Texture(this.terrain.image);
+    tex.needsUpdate = true;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    this.terrainMat = new THREE.ShaderMaterial({
       uniforms: {
-        uShading: { value: shading },
-        uWater: { value: water },
-        uFrame: { value: 0 },
-        uFrames: { value: atlas.frames },
-        uCols: { value: atlas.cols },
-        uRows: { value: Math.ceil(atlas.frames / atlas.cols) },
+        uT: { value: tex },
         uMap: { value: new THREE.Vector2(this.mapW, this.mapH) },
         uTime: { value: 0 },
+        uSun: { value: new THREE.Vector3(...SUN_DIR).normalize() },
+        uCam: { value: new THREE.Vector3() },
+        fogColor: { value: new THREE.Color(0x9fc3d6) },
+        fogNear: { value: 4000 },
+        fogFar: { value: 16000 },
       },
       vertexShader: /* glsl */ `
-        varying vec2 vUv;
-        varying vec2 vWorld;
+        uniform sampler2D uT;
         uniform vec2 uMap;
+        varying vec3 vPos;
+        varying float vSd;
+        ${NOISE}
+        float sdAt(vec2 p) { return (texture2D(uT, vec2(p.x / uMap.x, 1.0 - p.y / uMap.y)).r * 255.0 - 128.0) * 2.0; }
         void main() {
-          vUv = uv;
-          vWorld = vec2(uv.x, 1.0 - uv.y) * uMap;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          vec4 w = modelMatrix * vec4(position, 1.0);
+          float sd = sdAt(w.xz);
+          vSd = sd;
+          float land = smoothstep(0.0, 6.0, sd);
+          // relief: rises inland, ridged by noise
+          float hgt = land * (smoothstep(0.0, 120.0, sd) * 70.0 + fbm3(w.xz * 0.004) * 55.0 * smoothstep(10.0, 90.0, sd));
+          w.y = hgt;
+          vPos = w.xyz;
+          gl_Position = projectionMatrix * viewMatrix * w;
         }`,
       fragmentShader: /* glsl */ `
-        varying vec2 vUv;
-        varying vec2 vWorld;
-        uniform sampler2D uShading;
-        uniform sampler2D uWater;
-        uniform float uFrame, uFrames, uCols, uRows, uTime;
-        vec4 waterAt(vec2 p, float frame) {
-          vec2 cell = vec2(mod(frame, uCols), floor(frame / uCols));
-          vec2 f = fract(p / 128.0) * (126.0 / 128.0) + 1.0 / 128.0;
-          vec2 uv = (cell + f) / vec2(uCols, uRows);
-          uv.y = 1.0 - uv.y;
-          return texture2D(uWater, uv);
-        }
+        uniform sampler2D uT;
+        uniform vec2 uMap;
+        uniform float uTime;
+        uniform vec3 uSun, uCam, fogColor;
+        uniform float fogNear, fogFar;
+        varying vec3 vPos;
+        varying float vSd;
+        ${NOISE}
+        float sdAt(vec2 p) { return (texture2D(uT, vec2(p.x / uMap.x, 1.0 - p.y / uMap.y)).r * 255.0 - 128.0) * 2.0; }
         void main() {
-          vec3 sea = texture2D(uShading, vUv).rgb;
-          float f0 = floor(uFrame);
-          float k = uFrame - f0;
-          vec4 a = waterAt(vWorld, f0);
-          vec4 b = waterAt(vWorld, mod(f0 + 1.0, uFrames));
-          vec4 w = mix(a, b, k);
-          vec4 w2 = waterAt(vWorld * 0.37 + vec2(uTime * 3.0, uTime * 1.7), mod(f0 + 9.0, uFrames));
-          float wave = w.a * 2.2 + w2.a * 0.9;
-          vec3 col = sea * (1.12 - wave * 0.55);
-          // sparkle on wave crests
-          col += vec3(0.10, 0.13, 0.15) * smoothstep(0.08, 0.02, w.a) * (0.5 + 0.5 * sin(uTime * 2.0 + vWorld.x * 0.05));
+          float sd = sdAt(vPos.xz);
+          vec3 col;
+          vec3 V = normalize(uCam - vPos);
+          if (sd < 0.0) {
+            float depth = -sd;
+            vec3 shallow = vec3(0.30, 0.78, 0.76);
+            vec3 mid = vec3(0.08, 0.47, 0.62);
+            vec3 deep = vec3(0.03, 0.20, 0.42);
+            col = mix(shallow, mid, smoothstep(0.0, 28.0, depth));
+            col = mix(col, deep, smoothstep(28.0, 220.0, depth));
+            // animated wave normal from two scrolling noise layers
+            vec2 p = vPos.xz * 0.045;
+            float e = 0.35;
+            float n0 = fbm3(p + uTime * vec2(0.20, 0.12)) + 0.5 * fbm3(p * 2.3 - uTime * vec2(0.15, 0.25));
+            float nx = fbm3(p + vec2(e, 0.0) + uTime * vec2(0.20, 0.12)) + 0.5 * fbm3((p + vec2(e, 0.0)) * 2.3 - uTime * vec2(0.15, 0.25));
+            float nz = fbm3(p + vec2(0.0, e) + uTime * vec2(0.20, 0.12)) + 0.5 * fbm3((p + vec2(0.0, e)) * 2.3 - uTime * vec2(0.15, 0.25));
+            vec3 N = normalize(vec3((n0 - nx) * 2.2, 1.0, (n0 - nz) * 2.2));
+            float diff = clamp(dot(N, uSun), 0.0, 1.0);
+            vec3 H = normalize(uSun + V);
+            float spec = pow(clamp(dot(N, H), 0.0, 1.0), 90.0) * 1.4;
+            float fres = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 4.0);
+            col = col * (0.72 + 0.35 * diff) + vec3(1.0, 0.96, 0.85) * spec + vec3(0.55, 0.72, 0.85) * fres * 0.25;
+            // surf: bands rolling towards the beach, broken up by noise
+            float surf = smoothstep(14.0, 0.0, depth) * smoothstep(0.55, 0.85, sin(depth * 0.9 - uTime * 2.2) * 0.5 + 0.5 + vnoise(vPos.xz * 0.08) * 0.35);
+            col = mix(col, vec3(0.95, 0.98, 1.0), surf * 0.75 + smoothstep(2.5, 0.0, depth) * 0.6);
+          } else {
+            // faceted low-poly land shading from screen-space derivatives
+            vec3 N = normalize(cross(dFdx(vPos), dFdy(vPos)));
+            if (N.y < 0.0) N = -N;
+            float n = fbm(vPos.xz * 0.012);
+            float n2 = vnoise(vPos.xz * 0.06);
+            vec3 sand = vec3(0.93, 0.84, 0.62);
+            vec3 grass = mix(vec3(0.42, 0.62, 0.26), vec3(0.62, 0.70, 0.33), n2);
+            vec3 jungle = vec3(0.16, 0.42, 0.18);
+            vec3 rock = vec3(0.55, 0.50, 0.44);
+            col = mix(sand, grass, smoothstep(3.0, 9.0, sd));
+            col = mix(col, jungle, smoothstep(0.45, 0.65, n) * smoothstep(8.0, 20.0, sd));
+            float slope = 1.0 - N.y;
+            col = mix(col, rock, smoothstep(0.35, 0.6, slope) * smoothstep(20.0, 60.0, sd));
+            col = mix(col, vec3(0.92, 0.92, 0.9), smoothstep(105.0, 125.0, vPos.y));
+            float diff = clamp(dot(N, uSun), 0.0, 1.0);
+            col *= 0.55 + 0.6 * diff;
+          }
+          float f = smoothstep(fogNear, fogFar, length(uCam - vPos));
+          col = mix(col, fogColor, f);
           gl_FragColor = vec4(col, 1.0);
           #include <colorspace_fragment>
         }`,
     });
-    const sea = new THREE.Mesh(new THREE.PlaneGeometry(this.mapW, this.mapH), this.seaMat);
-    sea.position.set(this.mapW / 2, -this.mapH / 2, 0);
-    sea.renderOrder = 0;
-    this.scene.add(sea);
-
-    // land tiles
-    const geo = new THREE.PlaneGeometry(256, 256);
-    let done = 0;
-    await Promise.all(
-      tiles.map(async (key) => {
-        const [x, y] = key.split('_').map(Number);
-        const tex = await texture(`map/tiles/${key}.webp`);
-        tex.anisotropy = 8;
-        const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
-        m.position.set(x * 256 + 128, -(y * 256 + 128), 1);
-        m.renderOrder = 1;
-        this.scene.add(m);
-        onProgress(++done / tiles.length);
-      }),
-    );
-
-    // drifting clouds
-    const cloudTex = await Promise.all(['map/wolke01.webp', 'map/wolke03.webp', 'map/wolke05.webp'].map((p) => texture(p)));
-    for (let i = 0; i < 9; i++) {
-      const t = cloudTex[i % cloudTex.length];
-      const img = t.image as HTMLImageElement;
-      const s = 2.2 + Math.random() * 1.6;
-      const m = new THREE.Mesh(
-        new THREE.PlaneGeometry(img.width * s, img.height * s),
-        new THREE.MeshBasicMaterial({ map: t, transparent: true, opacity: 0.35, depthWrite: false }),
-      );
-      m.position.set(Math.random() * this.mapW, -Math.random() * this.mapH, 30);
-      m.renderOrder = 30;
-      this.clouds.push(m);
-      this.scene.add(m);
-    }
-
+    // one big terrain patch; the mesh is denser than the half-res distance field
+    const geo = new THREE.PlaneGeometry(this.mapW, this.mapH, 560, 410);
+    geo.rotateX(-Math.PI / 2);
+    const mesh = new THREE.Mesh(geo, this.terrainMat);
+    mesh.position.set(this.mapW / 2, 0, this.mapH / 2);
+    mesh.frustumCulled = false;
+    this.scene.add(mesh);
+    this.addTowns();
     this.buildLabels();
+    onProgress(1);
   }
 
-  private shipMaterial(type: number): THREE.MeshBasicMaterial {
-    let m = this.shipMats.get(type);
-    if (!m) {
-      m = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, alphaTest: 0.02 });
-      const mat = m;
-      void texture(`ships/${String(type).padStart(2, '0')}.webp`).then((t) => {
-        mat.map = t;
-        mat.needsUpdate = true;
-      });
-      this.shipMats.set(type, m);
+  /** Small clusters of houses, a church and the nation's flag at every town. */
+  private addTowns(): void {
+    const roof = [0xb5523b, 0xa8452f, 0x8e3b2a, 0xc0703f];
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xefe6d2, flatShading: true });
+    const roofMats = roof.map((c) => new THREE.MeshStandardMaterial({ color: c, flatShading: true }));
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    const cone = new THREE.ConeGeometry(0.8, 1, 4);
+    cone.rotateY(Math.PI / 4);
+    for (const t of this.session.data.towns) {
+      const g = new THREE.Group();
+      const rnd = mulberry(t.id + 1);
+      const n = t.rank === 'viceroy' ? 16 : t.rank === 'governor' ? 11 : 7;
+      let placed = 0;
+      for (let k = 0; k < n * 4 && placed < n; k++) {
+        const a = rnd() * Math.PI * 2, r = 4 + rnd() * (8 + n);
+        const x = t.x + Math.cos(a) * r, z = t.y + Math.sin(a) * r;
+        if (this.terrain.sd(x, z) < 3) continue;
+        const s = 3 + rnd() * 2.5;
+        const y = this.terrain.height(x, z);
+        const wall = new THREE.Mesh(box, wallMat);
+        wall.scale.set(s, s * 0.8, s * (0.8 + rnd() * 0.5));
+        wall.position.set(x, y + s * 0.4, z);
+        wall.rotation.y = rnd() * Math.PI;
+        const rf = new THREE.Mesh(cone, roofMats[Math.floor(rnd() * roofMats.length)]);
+        rf.scale.set(s * 0.95, s * 0.6, s * 0.95);
+        rf.position.set(x, y + s * 0.8 + s * 0.3, z);
+        rf.rotation.y = wall.rotation.y;
+        g.add(wall, rf);
+        placed++;
+      }
+      // church tower
+      const ty = this.terrain.height(t.x, t.y);
+      const tower = new THREE.Mesh(box, wallMat);
+      tower.scale.set(3.4, 10, 3.4);
+      tower.position.set(t.x, ty + 5, t.y);
+      const spire = new THREE.Mesh(cone, roofMats[0]);
+      spire.scale.set(3.5, 5, 3.5);
+      spire.position.set(t.x, ty + 12.5, t.y);
+      g.add(tower, spire);
+      this.scene.add(g);
     }
-    return m;
   }
 
   private buildLabels(): void {
     const root = labelRoot();
     for (const t of this.session.data.towns) {
-      const el = h(
-        'div',
-        { class: `town-label ${t.rank !== 'colony' ? 'capital' : ''}`, 'data-town': t.id },
-        h('img', { src: flagUrl(t.nation), alt: '' }),
-        t.name,
-      );
+      const el = h('div', { class: `town-label ${t.rank !== 'colony' ? 'capital' : ''}`, 'data-town': t.id },
+        h('img', { src: flagUrl(t.nation), alt: '' }), t.name);
       el.addEventListener('pointerdown', (e) => {
         e.stopPropagation();
         this.onTownClick?.(t.id, (e as PointerEvent).button);
@@ -234,8 +246,6 @@ export class SeaMapView {
     }
   }
 
-  onTownClick: ((town: number, button: number) => void) | null = null;
-
   setVisible(v: boolean): void {
     this.visible = v;
     for (const l of this.labels) l.style.display = v ? '' : 'none';
@@ -243,38 +253,71 @@ export class SeaMapView {
 
   // ---- camera -----------------------------------------------------------------------------
 
-  private viewport(): { w: number; h: number } {
+  private size(): { w: number; h: number } {
     const c = this.renderer.domElement;
-    return { w: c.clientWidth, h: c.clientHeight };
+    return { w: c.clientWidth || 1, h: c.clientHeight || 1 };
+  }
+
+  /** Approximate screen pixels per map pixel at the camera target (used for scroll speed). */
+  get zoom(): number {
+    const { h: hh } = this.size();
+    return hh / (2 * this.dist * Math.tan((FOV * Math.PI) / 360));
+  }
+  set zoom(z: number) {
+    const { h: hh } = this.size();
+    this.dist = hh / (2 * Math.max(0.01, z) * Math.tan((FOV * Math.PI) / 360));
   }
 
   clampCamera(): void {
-    const { w, h: hh } = this.viewport();
-    const minZoom = Math.max(w / this.mapW, hh / this.mapH) * 0.98;
-    this.zoom = Math.max(minZoom, Math.min(2.5, this.zoom));
-    const hw = w / this.zoom / 2;
-    const hh2 = hh / this.zoom / 2;
-    this.cx = Math.max(hw, Math.min(this.mapW - hw, this.cx));
-    this.cy = Math.max(hh2, Math.min(this.mapH - hh2, this.cy));
+    this.dist = Math.max(260, Math.min(5200, this.dist));
+    this.cx = Math.max(0, Math.min(this.mapW, this.cx));
+    this.cy = Math.max(0, Math.min(this.mapH, this.cy));
+  }
+
+  private updateCamera(): void {
+    this.clampCamera();
+    const { w, h: hh } = this.size();
+    this.camera.aspect = w / hh;
+    this.camera.position.set(this.cx, Math.sin(PITCH) * this.dist, this.cy + Math.cos(PITCH) * this.dist);
+    this.camera.lookAt(this.cx, 0, this.cy);
+    this.camera.updateProjectionMatrix();
+    this.camera.updateMatrixWorld();
   }
 
   screenToMap(sx: number, sy: number): [number, number] {
-    const { w, h: hh } = this.viewport();
-    return [this.cx + (sx - w / 2) / this.zoom, this.cy + (sy - hh / 2) / this.zoom];
+    this.updateCamera();
+    const { w, h: hh } = this.size();
+    this.raycaster.setFromCamera(new THREE.Vector2((sx / w) * 2 - 1, -(sy / hh) * 2 + 1), this.camera);
+    const p = new THREE.Vector3();
+    if (!this.raycaster.ray.intersectPlane(this.ground, p)) return [this.cx, this.cy];
+    return [p.x, p.z];
   }
 
-  mapToScreen(x: number, y: number): [number, number] {
-    const { w, h: hh } = this.viewport();
-    return [(x - this.cx) * this.zoom + w / 2, (y - this.cy) * this.zoom + hh / 2];
+  mapToScreen(x: number, y: number, height = 0): [number, number, boolean] {
+    const { w, h: hh } = this.size();
+    const v = new THREE.Vector3(x, height, y).project(this.camera);
+    return [(v.x + 1) * 0.5 * w, (1 - v.y) * 0.5 * hh, v.z < 1];
   }
 
   zoomAt(sx: number, sy: number, factor: number): void {
     const [mx, my] = this.screenToMap(sx, sy);
-    this.zoom *= factor;
+    this.dist /= factor;
     this.clampCamera();
     const [mx2, my2] = this.screenToMap(sx, sy);
     this.cx += mx - mx2;
     this.cy += my - my2;
+    this.clampCamera();
+  }
+
+  private dragAnchor: [number, number] | null = null;
+  dragStart(sx: number, sy: number): void {
+    this.dragAnchor = this.screenToMap(sx, sy);
+  }
+  dragTo(sx: number, sy: number): void {
+    if (!this.dragAnchor) return;
+    const [mx, my] = this.screenToMap(sx, sy);
+    this.cx += this.dragAnchor[0] - mx;
+    this.cy += this.dragAnchor[1] - my;
     this.clampCamera();
   }
 
@@ -291,72 +334,62 @@ export class SeaMapView {
     const core = this.session.core;
     const s = core.s;
     let best = -1;
-    let bd = (36 / Math.min(1, this.zoom)) ** 2;
+    let bd = 34 * 34;
     for (let c = 0; c < core.MAX_CONVOYS; c++) {
       const st = s.cvState[c];
       if (st === CvState.Free || st === CvState.Docked) continue;
-      const d = (s.cvX[c] - x) ** 2 + (s.cvY[c] - y) ** 2;
-      // prefer the player's own convoys
-      const bias = s.cvOwner[c] === Owner.Player ? 0.5 : 1;
-      if (d * bias < bd) {
-        bd = d * bias;
+      const [px, py] = this.mapToScreen(s.cvX[c], s.cvY[c], 6);
+      const d = ((px - sx) ** 2 + (py - sy) ** 2) * (s.cvOwner[c] === Owner.Player ? 0.5 : 1);
+      if (d < bd) {
+        bd = d;
         best = c;
       }
     }
     if (best >= 0) return { kind: 'convoy', id: best, x, y };
     for (const t of this.session.data.towns) {
-      if ((t.x - x) ** 2 + (t.y - y) ** 2 < (24 / Math.min(1, this.zoom)) ** 2) return { kind: 'town', id: t.id, x, y };
+      const [px, py] = this.mapToScreen(t.x, t.y);
+      if ((px - sx) ** 2 + (py - sy) ** 2 < 26 * 26) return { kind: 'town', id: t.id, x, y };
     }
     return { kind: 'sea', id: -1, x, y };
   }
 
-  // ---- per-frame --------------------------------------------------------------------------
+  // ---- per-frame ----------------------------------------------------------------------------
+
+  private shipScale(): number {
+    // ships are drawn far larger than life so they stay readable at map scale
+    return Math.max(0.9, Math.min(3.2, this.dist / 900));
+  }
 
   private syncShips(): void {
     const core = this.session.core;
     const s = core.s;
     const seen = new Set<number>();
+    const scale = this.shipScale();
     for (let c = 0; c < core.MAX_CONVOYS; c++) {
       const st = s.cvState[c];
       if (st === CvState.Free || st === CvState.Docked) continue;
       const type = this.session.flagshipType(c);
       if (type < 0) continue;
       seen.add(c);
-      let sp = this.sprites.get(c);
-      if (!sp || sp.type !== type) {
-        if (sp) this.scene.remove(sp.mesh);
-        const geo = new THREE.PlaneGeometry(SHIP_SIZE, SHIP_SIZE);
-        const mesh = new THREE.Mesh(geo, this.shipMaterial(type));
-        mesh.renderOrder = 10;
-        this.scene.add(mesh);
-        sp = { mesh, geo, type, frame: -1 };
-        this.sprites.set(c, sp);
+      const key = this.session.data.ships[type].key;
+      const nation = s.cvOwner[c] === Owner.Pirate ? 4 : s.cvNation[c];
+      let obj = this.ships.get(c);
+      if (!obj || obj.key !== key || obj.nation !== nation) {
+        if (obj) this.scene.remove(obj.group);
+        obj = { group: makeShip(key, nation), key, nation };
+        this.scene.add(obj.group);
+        this.ships.set(c, obj);
       }
-      const frame = headingFrame(s.cvHeading[c]);
-      if (frame !== sp.frame) {
-        sp.frame = frame;
-        const [u0, v0, u1, v1] = frameUv(frame);
-        const uv = sp.geo.attributes.uv as THREE.BufferAttribute;
-        // PlaneGeometry vertex order: top-left, top-right, bottom-left, bottom-right
-        uv.setXY(0, u0, v1);
-        uv.setXY(1, u1, v1);
-        uv.setXY(2, u0, v0);
-        uv.setXY(3, u1, v0);
-        uv.needsUpdate = true;
-      }
-      // gentle bobbing; small hulls are drawn a little larger, and everything stays readable
-      // when zoomed out
-      const ext = this.extents[String(type)] ?? 70;
-      const scale = Math.max(1, 62 / ext) * Math.max(1, 0.55 / this.zoom);
-      sp.mesh.scale.setScalar(scale);
-      const bob = Math.sin(this.time * 1.6 + c) * 1.2;
-      sp.mesh.position.set(s.cvX[c], -s.cvY[c] + 14 * scale + bob, 10 + (s.cvY[c] / this.mapH));
+      const g = obj.group;
+      const moving = s.cvSpeed[c] > 0.1;
+      g.scale.setScalar(scale);
+      g.position.set(s.cvX[c], Math.sin(this.time * 1.7 + c) * 0.6 * scale, s.cvY[c]);
+      g.rotation.set(Math.sin(this.time * 1.3 + c * 2) * 0.05 * (moving ? 1 : 0.5), -s.cvHeading[c], Math.sin(this.time * 0.9 + c) * 0.03);
     }
-    for (const [c, sp] of this.sprites) {
+    for (const [c, obj] of this.ships) {
       if (!seen.has(c)) {
-        this.scene.remove(sp.mesh);
-        sp.geo.dispose();
-        this.sprites.delete(c);
+        this.scene.remove(obj.group);
+        this.ships.delete(c);
       }
     }
   }
@@ -365,77 +398,60 @@ export class SeaMapView {
     const core = this.session.core;
     const s = core.s;
     const c = this.session.selected;
-    const show = this.session.isPlayerConvoy(c);
-    this.selRing.visible = show && s.cvState[c] !== CvState.Docked;
+    const show = this.session.isPlayerConvoy(c) && s.cvState[c] !== CvState.Docked;
+    this.selRing.visible = show;
     this.routeLine.visible = false;
     this.targetMarker.visible = false;
     if (!show) return;
-    const scale = Math.max(1, 0.55 / this.zoom);
-    this.selRing.scale.setScalar(scale);
-    this.selRing.position.set(s.cvX[c], -s.cvY[c], 9);
+    const type = this.session.flagshipType(c);
+    const r = (type >= 0 ? shipLength(this.session.data.ships[type].key) : 30) * 0.75 * this.shipScale();
+    this.selRing.scale.setScalar(r);
+    this.selRing.position.set(s.cvX[c], 1.2, s.cvY[c]);
     const path = core.path(c);
     if (s.cvState[c] === CvState.Sailing && path.length) {
       const pos = this.routeLine.geometry.attributes.position as THREE.BufferAttribute;
-      pos.setXYZ(0, s.cvX[c], -s.cvY[c], 8);
-      path.slice(0, 99).forEach(([x, y], i) => pos.setXYZ(i + 1, x, -y, 8));
+      pos.setXYZ(0, s.cvX[c], 2, s.cvY[c]);
+      path.slice(0, 99).forEach(([x, y], i) => pos.setXYZ(i + 1, x, 2, y));
       this.routeLine.geometry.setDrawRange(0, Math.min(100, path.length + 1));
       pos.needsUpdate = true;
       this.routeLine.computeLineDistances();
       this.routeLine.visible = true;
       const [tx, ty] = path[path.length - 1];
-      this.targetMarker.position.set(tx, -ty, 8);
+      this.targetMarker.position.set(tx, 2, ty);
+      this.targetMarker.scale.setScalar(this.shipScale());
       this.targetMarker.visible = true;
     }
   }
 
   private syncLabels(): void {
-    const { w, h: hh } = this.viewport();
-    const showMinor = this.zoom > 0.42;
-    const docked = new Map<number, number>();
+    const { w, h: hh } = this.size();
+    const showMinor = this.dist < 2600;
     const core = this.session.core;
-    for (const c of this.session.playerConvoys()) if (core.s.cvState[c] === CvState.Docked) docked.set(core.s.cvTown[c], c);
+    const docked = new Set<number>();
+    for (const c of this.session.playerConvoys()) if (core.s.cvState[c] === CvState.Docked) docked.add(core.s.cvTown[c]);
     for (const t of this.session.data.towns) {
       const el = this.labels[t.id];
-      const [sx, sy] = this.mapToScreen(t.x, t.y);
-      const visible = sx > -100 && sy > -40 && sx < w + 100 && sy < hh + 40 && (showMinor || t.rank !== 'colony');
+      const [sx, sy, front] = this.mapToScreen(t.x, t.y, this.terrain.height(t.x, t.y) + 22);
+      const visible = front && sx > -100 && sy > -40 && sx < w + 100 && sy < hh + 40 && (showMinor || t.rank !== 'colony');
       el.classList.toggle('hidden', !visible);
       if (visible) {
         el.style.left = `${sx}px`;
         el.style.top = `${sy}px`;
-        el.style.color = docked.has(t.id) ? '#9fe6ff' : '';
+        el.classList.toggle('docked', docked.has(t.id));
       }
     }
   }
 
   render(dt: number): void {
     this.time += dt;
-    const { w, h: hh } = this.viewport();
-    this.clampCamera();
-    const hw = w / this.zoom / 2;
-    const hh2 = hh / this.zoom / 2;
-    this.camera.left = this.cx - hw;
-    this.camera.right = this.cx + hw;
-    this.camera.top = -this.cy + hh2;
-    this.camera.bottom = -this.cy - hh2;
-    this.camera.updateProjectionMatrix();
-    if (this.seaMat) {
-      this.seaMat.uniforms.uTime.value = this.time;
-      this.seaMat.uniforms.uFrame.value = (this.time * 9) % this.seaMat.uniforms.uFrames.value;
-    }
-    // clouds drift with the wind
-    const wind = this.session.core.x.windDir();
-    for (const [i, cl] of this.clouds.entries()) {
-      cl.position.x += Math.cos(wind) * dt * (8 + i);
-      cl.position.y -= Math.sin(wind) * dt * (8 + i);
-      if (cl.position.x < -600) cl.position.x = this.mapW + 600;
-      if (cl.position.x > this.mapW + 600) cl.position.x = -600;
-      if (cl.position.y > 600) cl.position.y = -this.mapH - 600;
-      if (cl.position.y < -this.mapH - 600) cl.position.y = 600;
-      (cl.material as THREE.MeshBasicMaterial).opacity = Math.min(0.35, 0.18 / this.zoom);
+    this.updateCamera();
+    if (this.terrainMat) {
+      this.terrainMat.uniforms.uTime.value = this.time;
+      this.terrainMat.uniforms.uCam.value.copy(this.camera.position);
     }
     this.syncShips();
     this.syncSelection();
-    this.syncLabels();
+    if (this.terrain) this.syncLabels();
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -444,8 +460,18 @@ export class SeaMapView {
     this.labels = [];
   }
 
-  /** URL of the overview image for the minimap. */
   static overviewUrl(): string {
-    return asset('map/overview.webp');
+    return worldUrl('overview.png');
   }
+}
+
+function mulberry(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }

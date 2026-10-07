@@ -1,12 +1,11 @@
 {
-  "name": "port-royale-2-web",
+  "name": "caribbean-trader",
   "version": "0.1.0",
   "private": true,
-  "description": "Port Royale 2 in the browser: AssemblyScript/WASM simulation core + Three.js WebGL renderer.",
+  "description": "A Port Royale 2-inspired trading and naval game: AssemblyScript/WASM simulation, three.js WebGL graphics.",
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "extract": "node scripts/extract/extract.ts",
     "build:wasm": "asc wasm/assembly/index.ts --config wasm/asconfig.json --target release",
     "build:wasm:debug": "asc wasm/assembly/index.ts --config wasm/asconfig.json --target debug",
     "predev": "npm run build:wasm",
@@ -15,7 +14,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "node --test tests/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "world": "node scripts/geo/build-world.ts"
   },
   "engines": {
     "node": ">=22.18"

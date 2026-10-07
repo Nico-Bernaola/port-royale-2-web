@@ -1,4 +1,4 @@
-/** Shape of public/game/data/game.json (written by scripts/extract/extract.ts). */
+/** Shapes of the static game data (see src/data/world.ts). */
 
 export interface GoodDef {
   id: number;

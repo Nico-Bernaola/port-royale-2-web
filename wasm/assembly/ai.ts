@@ -32,7 +32,9 @@ export function setPopulationTargets(traders: i32, pirates: i32): void {
   targetPirates = pirates;
 }
 
-const TRADER_TYPES: StaticArray<i32> = [5, 6, 2, 3, 11, 0, 1, 12];
+// ship class ids from src/data/world.ts: fluyt, east indiaman, brig, barque, galleon, pinnace, sloop
+const TRADER_TYPES: StaticArray<i32> = [5, 6, 2, 3, 9, 0, 1];
+// raider barque, sloop, brig, barque, corvette
 const PIRATE_TYPES: StaticArray<i32> = [4, 1, 2, 3, 7];
 
 const AI_IDLE: i32 = 0;
