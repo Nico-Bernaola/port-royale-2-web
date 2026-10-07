@@ -1,6 +1,6 @@
 /**
- * Integration tests for the WASM simulation core, run against the extracted game data.
- *   npm run build:wasm && npm run extract && npm test
+ * Integration tests for the WASM simulation core, run against the game world.
+ *   npm run build:wasm && npm test
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -8,15 +8,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import { Core, CvState, Ev, Owner } from '../src/core/core.ts';
 import type { GameData } from '../src/core/data.ts';
 import { configureCore, newGame } from '../src/core/world.ts';
+import { world } from '../src/data/world.ts';
 
 const WASM = 'src/wasm/build/core.wasm';
-const DATA = 'public/game/data/game.json';
-const NAV = 'public/game/map/nav.bin';
-const ready = existsSync(WASM) && existsSync(DATA) && existsSync(NAV);
+const NAV = 'public/world/nav.bin';
+const ready = existsSync(WASM) && existsSync(NAV);
 
 async function boot(seed = 1234) {
   const core = await Core.load(readFileSync(WASM));
-  const data = JSON.parse(readFileSync(DATA, 'utf8')) as GameData;
+  const data: GameData = world;
   configureCore(core, data, new Uint8Array(readFileSync(NAV)), seed);
   return { core, data };
 }
@@ -29,7 +29,7 @@ function town(data: GameData, name: string) {
 
 test('every town dock is reachable from Port Royale', { skip: !ready }, async () => {
   const { core, data } = await boot();
-  const pr = town(data, 'Port Royale');
+  const pr = town(data, 'Port Royal');
   const s = core.s;
   let failures: string[] = [];
   for (const t of data.towns) {
@@ -60,9 +60,10 @@ test('routes stay on water', { skip: !ready }, async () => {
 
 test('economy runs and prices react to trade', { skip: !ready }, async () => {
   const { core, data } = await boot();
-  const pr = town(data, 'Port Royale');
+  const pr = town(data, 'Port Royal');
   const { convoy } = newGame(core, data, { startTown: pr.id, gold: 50000, ships: [{ type: 5, name: 'Test' }] });
-  const wheat = 4;
+  // trade the good this town has most of
+  const wheat = data.goods.reduce((best, g) => (core.stock(pr.id, g.id) > core.stock(pr.id, best) ? g.id : best), 0);
   const before = core.x.buyPrice(pr.id, wheat);
   assert.ok(before > 10 && before < 1000, `price ${before}`);
   const gold0 = core.x.gold();
@@ -93,7 +94,7 @@ test('economy runs and prices react to trade', { skip: !ready }, async () => {
 
 test('player convoy sails to another town and docks', { skip: !ready }, async () => {
   const { core, data } = await boot();
-  const pr = town(data, 'Port Royale'), dest = town(data, 'Santiago');
+  const pr = town(data, 'Port Royal'), dest = town(data, 'Santiago');
   const { convoy } = newGame(core, data, { startTown: pr.id, gold: 10000, ships: [{ type: 0, name: 'P' }] });
   assert.ok(core.x.sailToTown(convoy, dest.id));
   assert.equal(core.s.cvState[convoy] as number, CvState.Sailing);
@@ -109,7 +110,7 @@ test('player convoy sails to another town and docks', { skip: !ready }, async ()
 
 test('sea battle resolves', { skip: !ready }, async () => {
   const { core, data } = await boot();
-  const pr = town(data, 'Port Royale');
+  const pr = town(data, 'Port Royal');
   const { convoy } = newGame(core, data, { startTown: pr.id, gold: 10000, ships: [{ type: 8, name: 'Frigate' }] });
   const pirate = core.x.spawnPirate();
   assert.ok(pirate >= 0);

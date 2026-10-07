@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import './styles.css';
 import wasmUrl from './wasm/build/core.wasm?url';
-import { assetsPresent, fetchBytes, fetchJson, registerStyleAssets } from './assets.ts';
+import { fetchBytes, registerStyleAssets, worldUrl } from './assets.ts';
 import { audio } from './audio.ts';
 import { Core, CvState, Ev } from './core/core.ts';
 import type { GameData } from './core/data.ts';
+import { world } from './data/world.ts';
 import { Session } from './game/session.ts';
 import { SeaMapView } from './render/seaMap.ts';
 import { SeaController } from './game/seaController.ts';
@@ -42,20 +43,13 @@ export class App {
   }
 
   async boot(): Promise<void> {
-    await registerStyleAssets();
-    if (!(await assetsPresent())) {
-      this.showMissingAssets();
-      return;
-    }
-    const loading = this.loadingScreen('Loading the Caribbean...');
+    registerStyleAssets();
+    audio.unlock();
+    const loading = this.loadingScreen('Charting the Caribbean...');
     try {
-      const [core, data, nav] = await Promise.all([
-        Core.load(fetch(wasmUrl)),
-        fetchJson<GameData>('data/game.json'),
-        fetchBytes('map/nav.bin'),
-      ]);
+      const [core, nav] = await Promise.all([Core.load(fetch(wasmUrl)), fetchBytes(worldUrl('nav.bin'))]);
       this.core = core;
-      this.data = data;
+      this.data = world;
       this.nav = nav;
       loading.set(1, 'Ready');
     } catch (e) {
@@ -68,7 +62,7 @@ export class App {
     // ?quickstart[=Town] jumps straight into a normal-difficulty game (handy for testing)
     const quick = new URLSearchParams(location.search).get('quickstart');
     if (quick !== null) {
-      const t = this.data.towns.find((x) => x.name === (quick || 'Port Royale'))?.id ?? 0;
+      const t = this.data.towns.find((x) => x.name === (quick || 'Port Royal'))?.id ?? 0;
       await this.startSession((s) => s.startNew('Captain', t, 25000, [5]));
       return;
     }
@@ -111,23 +105,6 @@ export class App {
     };
   }
 
-  private showMissingAssets(): void {
-    uiRoot().append(
-      h(
-        'div',
-        { class: 'overlay' },
-        h(
-          'div',
-          { class: 'parchment plain missing-assets' },
-          h('h2', null, 'Game assets not found'),
-          h('p', null, 'This port loads its art, map, music and data from your own copy of Port Royale 2. Extract them once with:'),
-          h('p', null, h('code', null, 'npm run extract -- "C:\\Games\\Gog\\Port Royale 2"')),
-          h('p', { class: 'muted' }, 'Then reload this page. The extracted files go to public/game/ and are never committed.'),
-        ),
-      ),
-    );
-  }
-
   private fatal(e: Error): void {
     console.error(e);
     uiRoot().append(h('div', { class: 'overlay' }, h('div', { class: 'parchment plain missing-assets' }, h('h2', null, 'Something went wrong'), h('p', null, e.message))));
@@ -142,13 +119,13 @@ export class App {
     const box = h(
       'div',
       { class: 'menu-box parchment' },
-      h('h1', null, 'Port Royale 2'),
-      h('div', { class: 'subtitle' }, 'Empire and Pirates'),
+      h('h1', null, 'Caribbean Trader'),
+      h('div', { class: 'subtitle' }, 'Trade, build and fight your way across the Spanish Main, 1600'),
       h('button', { class: 'btn', onclick: () => this.showNewGame() }, 'New Game'),
       h('button', { class: 'btn', disabled: !canContinue, onclick: () => void this.continueGame() }, 'Continue'),
-      h('button', { class: 'btn', onclick: () => this.showAbout() }, 'About this port'),
+      h('button', { class: 'btn', onclick: () => this.showAbout() }, 'How to play'),
     );
-    ui.append(h('div', { class: 'menu-screen', id: 'menu' }, box, h('div', { class: 'menu-foot' }, 'Assets © Ascaron Entertainment. Web port: WebAssembly + WebGL.')));
+    ui.append(h('div', { class: 'menu-screen', id: 'menu' }, box, h('div', { class: 'menu-foot' }, 'Inspired by Port Royale 2 · simulation in WebAssembly, graphics in WebGL · coastlines from Natural Earth')));
   }
 
   private showAbout(): void {
@@ -157,9 +134,9 @@ export class App {
       h(
         'div',
         { class: 'col', style: 'max-width:560px;font-size:15px' },
-        h('p', null, 'A browser reimplementation of Port Royale 2. The simulation (economy, navigation, AI traders and pirates, sea battles) runs in a WebAssembly module compiled from AssemblyScript; the Caribbean, ships and towns are rendered with WebGL (three.js) using the original art extracted from your game files.'),
-        h('p', null, h('b', null, 'Sea map: '), 'left-click a convoy to select it, right-click the sea or a town to sail there, drag to scroll, mouse wheel to zoom. Space pauses, 1/2/3 set the speed.'),
-        h('p', null, h('b', null, 'Ports: '), 'click a building — market (trade), shipyard (buy/repair ships), tavern (hire sailors), harbour (manage convoys), town hall (town info).'),
+        h('p', null, 'Start with a ship and some gold in a Caribbean port. Buy goods where they are cheap, sail them to towns that need them, and grow a merchant fleet. Pirates hunt convoys at sea: arm your ships, hire sailors, or outrun them.'),
+        h('p', null, h('b', null, 'Sea map: '), 'left-click your convoy to select it, right-click the sea or a town to sail there. Drag to scroll, mouse wheel to zoom. Space pauses, 1/2/3 set the speed. Click a town where your convoy lies to go ashore.'),
+        h('p', null, h('b', null, 'Ports: '), 'click a building — the market (trade), warehouse (store goods), shipyard (commission, buy, repair and arm ships), harbour (form convoys), tavern (sailors and trade rumours) and town hall (what the town makes and needs).'),
         h('p', null, h('b', null, 'Battles: '), 'right-click to steer your flagship, Q/E fire port/starboard broadsides, 1/2/3 choose round, grape or chain shot.'),
       ),
       { plain: true },
@@ -168,15 +145,15 @@ export class App {
 
   private showNewGame(): void {
     const name = h('input', { value: 'Henry Morgan', maxlength: 24 }) as HTMLInputElement;
-    // any governor's or viceroy's town can be home; ownership follows the game data (1600)
+    // any governor's or viceroy's town can be home
     const homes = this.data.towns.filter((t) => t.rank !== 'colony').sort((a, b) => a.name.localeCompare(b.name));
-    const town = h('select', null, ...homes.map((t) => h('option', { value: t.id, selected: t.name === 'Port Royale' }, `${t.name} (${t.nation})`))) as HTMLSelectElement;
+    const town = h('select', null, ...homes.map((t) => h('option', { value: t.id, selected: t.name === 'Port Royal' }, `${t.name} (${t.nation})`))) as HTMLSelectElement;
     const diff = h(
       'select',
       null,
-      h('option', { value: 'easy' }, 'Easy — 50,000 gold, fluyt and pinnace'),
-      h('option', { value: 'normal', selected: true }, 'Normal — 25,000 gold, fluyt'),
-      h('option', { value: 'hard' }, 'Hard — 8,000 gold, pinnace'),
+      h('option', { value: 'easy' }, 'Easy: 50,000 gold, a fluyt and a pinnace'),
+      h('option', { value: 'normal', selected: true }, 'Normal: 25,000 gold and a fluyt'),
+      h('option', { value: 'hard' }, 'Hard: 8,000 gold and a pinnace'),
     ) as HTMLSelectElement;
     const m = modal(
       'New Game',
@@ -225,6 +202,13 @@ export class App {
     await this.sea.load((k) => loading.set(0.2 + k * 0.8, 'Charting the coasts...'));
     loading.el.remove();
     session.on((e) => this.onEvent(e));
+    session.notes.add((n) => {
+      if (n.kind === 'shipReady') {
+        audio.sfx('dock');
+        toast(`The ${n.order.name} has been launched in ${this.data.towns[n.order.town].name} and waits in the harbour.`, 6000);
+        if (this.town?.town === n.order.town) this.enterTown(n.order.town);
+      }
+    });
     this.seaCtl = new SeaController(this, session, this.sea);
     const c = session.selected;
     if (c >= 0) this.sea.centerOn(this.core.s.cvX[c], this.core.s.cvY[c]);

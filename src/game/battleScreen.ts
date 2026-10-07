@@ -1,14 +1,14 @@
 /**
- * Sea battle: the WASM core simulates ships and cannonballs; this screen renders them with
- * WebGL (ship sprites by heading, cannonballs, splashes, smoke) and maps player input to
- * the core's battle commands.
+ * Sea battle: the WASM core simulates ships and cannonballs; this screen renders them in 3D
+ * (procedural ships, wave-shaded water, smoke and splashes) and maps player input to the
+ * core's battle commands. Arena units: x = east, z = south, y = up.
  */
 import * as THREE from 'three';
 import { audio } from '../audio.ts';
-import { texture } from '../assets.ts';
 import { Ammo, BattleFlag, Ev } from '../core/core.ts';
 import type { App } from '../main.ts';
-import { frameUv, headingFrame } from '../render/seaMap.ts';
+import { NOISE, SUN_DIR } from '../render/glsl.ts';
+import { makeShip } from '../render/ships3d.ts';
 import { h, uiRoot } from '../ui/dom.ts';
 import type { Session } from './session.ts';
 
@@ -16,18 +16,32 @@ const ARENA_W = 1800;
 const ARENA_H = 1300;
 
 interface ShipGfx {
-  mesh: THREE.Mesh;
-  geo: THREE.PlaneGeometry;
-  frame: number;
+  group: THREE.Group;
   ring: THREE.Mesh;
   sink: number;
+  heel: number;
 }
 
 interface Fx {
-  mesh: THREE.Mesh;
+  sprite: THREE.Sprite;
   life: number;
   max: number;
   grow: number;
+  rise: number;
+  opacity: number;
+}
+
+function puffTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d')!;
+  const grad = g.createRadialGradient(32, 32, 2, 32, 32, 30);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.5, 'rgba(255,255,255,0.6)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
 }
 
 export class BattleScreen {
@@ -37,18 +51,20 @@ export class BattleScreen {
   private pirate: number;
   private done: () => void;
   private scene = new THREE.Scene();
-  private camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -100, 100);
+  private camera = new THREE.PerspectiveCamera(42, 1, 5, 12000);
   private waterMat!: THREE.ShaderMaterial;
   private ships: ShipGfx[] = [];
   private balls: THREE.InstancedMesh;
   private fx: Fx[] = [];
-  private fxGeo = new THREE.CircleGeometry(1, 20);
-  private ringGeo = new THREE.RingGeometry(0.8, 1, 24);
+  private puff = puffTexture();
   private targetMarker: THREE.Mesh;
+  private raycaster = new THREE.Raycaster();
+  private ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   private time = 0;
   private speed = 1;
   private flagship = 0;
   private finished = false;
+  private autoFire = true;
   private root: HTMLElement;
   private hudLeft!: HTMLElement;
   private hudRight!: HTMLElement;
@@ -75,75 +91,70 @@ export class BattleScreen {
     core.x.battleSetAuto(0, 0, 1);
     core.drainEvents();
 
-    this.scene.background = new THREE.Color(0x0b3354);
-    this.balls = new THREE.InstancedMesh(new THREE.CircleGeometry(3.2, 8), new THREE.MeshBasicMaterial({ color: 0x1a1a1a }), core.MAX_BALLS);
-    this.balls.renderOrder = 50;
+    this.scene.background = new THREE.Color(0x9cc4dc);
+    this.scene.fog = new THREE.Fog(0x9cc4dc, 1800, 6000);
+    const sun = new THREE.DirectionalLight(0xfff0d8, 2.4);
+    sun.position.set(SUN_DIR[0], SUN_DIR[1], SUN_DIR[2]).multiplyScalar(1000);
+    this.scene.add(sun, new THREE.HemisphereLight(0xd6eaff, 0x2a4a5a, 1.1));
+    this.balls = new THREE.InstancedMesh(new THREE.SphereGeometry(2.6, 8, 6), new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.4 }), core.MAX_BALLS);
     this.balls.frustumCulled = false;
     this.scene.add(this.balls);
-    this.targetMarker = new THREE.Mesh(this.ringGeo, new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.8 }));
-    this.targetMarker.scale.setScalar(14);
-    this.targetMarker.renderOrder = 5;
+    this.targetMarker = new THREE.Mesh(new THREE.RingGeometry(10, 14, 32), new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.85, side: THREE.DoubleSide }));
+    this.targetMarker.rotation.x = -Math.PI / 2;
+    this.targetMarker.visible = false;
     this.scene.add(this.targetMarker);
 
     this.root = h('div', { style: 'position:absolute;inset:0;pointer-events:none' });
     uiRoot().append(this.root);
-    void this.build();
+    this.build();
   }
 
-  private async build(): Promise<void> {
-    const water = await texture('map/water-atlas.webp');
-    const shading = await texture('map/sea-shading.webp');
+  private build(): void {
     this.waterMat = new THREE.ShaderMaterial({
-      uniforms: { uWater: { value: water }, uShade: { value: shading }, uTime: { value: 0 } },
-      vertexShader: `varying vec2 vP; void main(){ vP = position.xy; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);} `,
+      uniforms: { uTime: { value: 0 }, uSun: { value: new THREE.Vector3(...SUN_DIR).normalize() }, uCam: { value: new THREE.Vector3() } },
+      vertexShader: 'varying vec3 vP; void main(){ vec4 w = modelMatrix * vec4(position,1.0); vP = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }',
       fragmentShader: /* glsl */ `
-        varying vec2 vP;
-        uniform sampler2D uWater, uShade;
+        varying vec3 vP;
         uniform float uTime;
-        vec4 W(vec2 p, float f) {
-          vec2 cell = vec2(mod(f, 8.0), floor(f / 8.0));
-          vec2 q = fract(p / 128.0) * (126.0/128.0) + 1.0/128.0;
-          return texture2D(uWater, vec2((cell.x + q.x) / 8.0, 1.0 - (cell.y + q.y) / 4.0));
-        }
+        uniform vec3 uSun, uCam;
+        ${NOISE}
+        float waves(vec2 p) { return fbm3(p + uTime * vec2(0.25, 0.15)) + 0.5 * fbm3(p * 2.4 - uTime * vec2(0.2, 0.3)); }
         void main() {
-          // open-sea colour from the sea map's shading, brightened for the close-up view
-          vec3 sea = texture2D(uShade, vec2(0.62, 0.55)).rgb * 1.25 + vec3(0.02, 0.05, 0.07);
-          float f = mod(floor(uTime * 9.0), 27.0);
-          vec2 p = vP * 0.55;
-          float a = W(p, f).a * 2.6 + W(p * 0.45 + uTime * 6.0, mod(f + 11.0, 27.0)).a * 1.4;
-          vec3 col = sea * (1.25 - a * 0.85);
-          col += vec3(0.12, 0.16, 0.18) * smoothstep(0.07, 0.015, W(p, f).a);
+          vec2 p = vP.xz * 0.02;
+          float e = 0.25;
+          float n0 = waves(p), nx = waves(p + vec2(e, 0.0)), nz = waves(p + vec2(0.0, e));
+          vec3 N = normalize(vec3((n0 - nx) * 2.4, 1.0, (n0 - nz) * 2.4));
+          vec3 V = normalize(uCam - vP);
+          vec3 H = normalize(uSun + V);
+          float spec = pow(max(dot(N, H), 0.0), 110.0) * 1.5;
+          float fres = pow(1.0 - max(dot(N, V), 0.0), 4.0);
+          vec3 col = mix(vec3(0.05, 0.30, 0.48), vec3(0.08, 0.42, 0.56), n0);
+          col = col * (0.75 + 0.35 * max(dot(N, uSun), 0.0)) + spec + vec3(0.5, 0.7, 0.85) * fres * 0.35;
+          col = mix(col, vec3(0.92, 0.97, 1.0), smoothstep(0.80, 0.95, n0) * 0.35);
+          float fogF = smoothstep(1800.0, 6000.0, length(uCam - vP));
+          col = mix(col, vec3(0.61, 0.77, 0.86), fogF);
           gl_FragColor = vec4(col, 1.0);
           #include <colorspace_fragment>
         }`,
     });
-    const water3 = new THREE.Mesh(new THREE.PlaneGeometry(ARENA_W * 3, ARENA_H * 3), this.waterMat);
-    water3.position.set(ARENA_W / 2, -ARENA_H / 2, -1);
-    this.scene.add(water3);
-    // arena boundary hint
-    const border = new THREE.LineLoop(
-      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(ARENA_W, 0, 0), new THREE.Vector3(ARENA_W, -ARENA_H, 0), new THREE.Vector3(0, -ARENA_H, 0)]),
-      new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 20, gapSize: 20, transparent: true, opacity: 0.18 }),
-    );
-    border.computeLineDistances();
-    this.scene.add(border);
+    const water = new THREE.Mesh(new THREE.PlaneGeometry(ARENA_W * 6, ARENA_H * 6), this.waterMat);
+    water.rotation.x = -Math.PI / 2;
+    water.position.set(ARENA_W / 2, 0, ARENA_H / 2);
+    this.scene.add(water);
 
     const core = this.session.core;
     const n = core.x.battleShipCount();
     for (let i = 0; i < n; i++) {
-      const type = core.s.bsType[i];
-      const t = await texture(`ships/${String(type).padStart(2, '0')}.webp`);
-      const size = core.s.bsLength[i] * 2.6;
-      const geo = new THREE.PlaneGeometry(size, size);
-      const mat = new THREE.MeshBasicMaterial({ map: t, transparent: true, depthTest: false });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.renderOrder = 10;
+      const key = this.session.data.ships[core.s.bsType[i]].key;
       const side = core.s.bsSide[i];
-      const ring = new THREE.Mesh(this.ringGeo, new THREE.MeshBasicMaterial({ color: side === 0 ? 0x4fa3ff : 0xff5040, transparent: true, opacity: 0.55, depthTest: false }));
-      ring.scale.setScalar(core.s.bsLength[i] * 0.75);
-      ring.renderOrder = 9;
-      this.scene.add(ring, mesh);
-      this.ships.push({ mesh, geo, frame: -1, ring, sink: 0 });
+      const group = makeShip(key, side === 0 ? this.session.playerNation : 4);
+      // battle hull length -> model length
+      group.scale.setScalar((core.s.bsLength[i] * 1.5) / (group.userData.length as number));
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.85, 1, 40), new THREE.MeshBasicMaterial({ color: side === 0 ? 0x4fa3ff : 0xff5040, transparent: true, opacity: 0.55, side: THREE.DoubleSide }));
+      ring.rotation.x = -Math.PI / 2;
+      ring.scale.setScalar(core.s.bsLength[i] * 0.9);
+      this.scene.add(ring, group);
+      this.ships.push({ group, ring, sink: 0, heel: 0 });
     }
     this.buildUi();
     this.bindInput();
@@ -153,8 +164,8 @@ export class BattleScreen {
 
   private buildUi(): void {
     const core = this.session.core;
-    this.hudLeft = h('div', { class: 'battle-ships parchment plain', style: 'pointer-events:auto' });
-    this.hudRight = h('div', { class: 'battle-ships enemy parchment plain', style: 'pointer-events:auto' });
+    this.hudLeft = h('div', { class: 'battle-ships parchment', style: 'pointer-events:auto' });
+    this.hudRight = h('div', { class: 'battle-ships enemy parchment', style: 'pointer-events:auto' });
     this.reloadL = h('i');
     this.reloadR = h('i');
     const btn = (label: string, title: string, fn: () => void, id?: string) =>
@@ -171,7 +182,7 @@ export class BattleScreen {
         h('div', { class: 'reload' }, this.reloadR), btn('Fire (E) ▶', 'Fire the starboard broadside', () => this.fire(1))),
       h('div', { class: 'group' },
         btn('Auto-fire', 'Fire automatically when an enemy is abeam', () => {
-          const cur = this.autoFire = !this.autoFire;
+          const cur = (this.autoFire = !this.autoFire);
           core.x.battleSetAuto(this.flagship, 1, cur ? 1 : 0);
           this.syncButtons();
         }, 'auto'),
@@ -180,12 +191,10 @@ export class BattleScreen {
         btn('Flee', 'Break off the fight', () => this.flee())),
     );
     this.root.append(this.hudLeft, this.hudRight, this.controls,
-      h('div', { class: 'help-hint wood', style: 'bottom:auto;top:12px;left:50%;transform:translateX(-50%)' }, 'Right-click: steer your flagship · Q/E: broadsides · 1/2/3: ammunition · B: board'));
+      h('div', { class: 'help-hint wood', style: 'bottom:auto;top:12px;left:50%;transform:translateX(-50%)' }, 'Click the sea to steer your flagship · Q/E fire broadsides · 1/2/3 ammunition · B board'));
     this.syncButtons();
     this.refreshHud();
   }
-
-  private autoFire = true;
 
   private syncButtons(): void {
     const core = this.session.core;
@@ -212,10 +221,7 @@ export class BattleScreen {
 
   private board(): void {
     const core = this.session.core;
-    if (!core.x.battleBoard(this.flagship)) {
-      // either too far away or the boarding failed; the core reports captures as events
-      if (core.x.battleActive(this.flagship)) audio.sfx('negative', 0.4);
-    }
+    if (!core.x.battleBoard(this.flagship) && core.x.battleActive(this.flagship)) audio.sfx('negative', 0.4);
   }
 
   private flee(): void {
@@ -233,14 +239,14 @@ export class BattleScreen {
       const status = s.bsFlags[i] & BattleFlag.Sunk ? ' — sunk' : s.bsFlags[i] & BattleFlag.Captured ? ' — captured' : s.bsFlags[i] & BattleFlag.Escaped ? ' — escaped' : s.bsFlags[i] & BattleFlag.Fleeing ? ' — fleeing' : '';
       const name = s.bsSide[i] === 0 ? this.session.shipName(s.bsShip[i]) : `Pirate ${t.name}`;
       return h('div', { class: `s ${dead ? 'dead' : ''}` },
-        h('div', null, i === this.flagship ? '⚑ ' : '', name, h('span', { class: 'muted' }, status)),
+        h('div', null, i === this.flagship ? '⚑ ' : '', h('b', null, name), h('span', { class: 'muted' }, status)),
         h('div', { class: 'muted', style: 'font-size:12px' }, `Crew ${Math.round(s.bsCrew[i])} · Guns ${s.bsCannons[i]} · Sails ${Math.round(s.bsSails[i])}%`),
         h('div', { class: 'hp' }, h('i', { style: `width:${Math.max(0, hull * 100)}%;background:${hull > 0.5 ? '#3d6b2a' : hull > 0.25 ? '#b8862a' : '#9b2a1a'}` })));
     };
     const mine: HTMLElement[] = [], theirs: HTMLElement[] = [];
     for (let i = 0; i < n; i++) (s.bsSide[i] === 0 ? mine : theirs).push(line(i));
-    this.hudLeft.replaceChildren(h('b', null, 'Your ships'), ...mine);
-    this.hudRight.replaceChildren(h('b', null, 'Pirates'), ...theirs);
+    this.hudLeft.replaceChildren(h('h3', { style: 'font-size:15px' }, 'Your ships'), ...mine);
+    this.hudRight.replaceChildren(h('h3', { style: 'font-size:15px' }, 'Pirates'), ...theirs);
   }
 
   // ---- input ----------------------------------------------------------------------------------
@@ -255,10 +261,9 @@ export class BattleScreen {
     this.on(canvas, 'pointerdown', ((e: PointerEvent) => {
       if (this.finished) return;
       const [x, y] = this.screenToArena(e.clientX, e.clientY);
-      if (e.button === 2 || e.button === 0) {
-        this.session.core.x.battleSetTarget(this.flagship, x, y); // also switches to manual steering
-        this.targetMarker.position.set(x, -y, 1);
-      }
+      this.session.core.x.battleSetTarget(this.flagship, x, y); // also switches to manual steering
+      this.targetMarker.position.set(x, 1.5, y);
+      this.targetMarker.visible = true;
     }) as EventListener);
     this.on(window, 'keydown', ((e: KeyboardEvent) => {
       if (this.finished) return;
@@ -272,13 +277,12 @@ export class BattleScreen {
     }) as EventListener);
   }
 
-  /** camera centre (arena units) and scale (screen px per unit), eased towards the action */
-  private cam = { x: ARENA_W / 2, y: ARENA_H / 2, scale: 0 };
+  /** camera target (arena units) and distance, eased towards the action */
+  private cam = { x: ARENA_W / 2, y: ARENA_H / 2, dist: 0 };
 
   private updateCamera(dt: number): void {
     const core = this.session.core;
     const s = core.s;
-    const c = this.app.renderer.domElement;
     let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
     const n = core.x.battleShipCount();
     for (let i = 0; i < n; i++) {
@@ -287,36 +291,45 @@ export class BattleScreen {
       y0 = Math.min(y0, s.bsY[i]); y1 = Math.max(y1, s.bsY[i]);
     }
     if (x0 > x1) { x0 = 0; x1 = ARENA_W; y0 = 0; y1 = ARENA_H; }
-    const pad = 260;
-    const w = Math.max(900, x1 - x0 + pad * 2), hgt = Math.max(650, y1 - y0 + pad * 2);
-    const fit = Math.min(c.clientWidth / w, (c.clientHeight - 140) / hgt);
-    const full = Math.min(c.clientWidth / (ARENA_W + 120), (c.clientHeight - 140) / (ARENA_H + 120));
-    const target = Math.max(full, Math.min(1.4, fit));
-    const k = this.cam.scale === 0 ? 1 : Math.min(1, dt * 1.5);
-    this.cam.scale += (target - this.cam.scale) * k;
+    const extent = Math.max(500, x1 - x0, (y1 - y0) * 1.4) + 350;
+    const target = Math.min(2600, extent * 0.95);
+    const k = this.cam.dist === 0 ? 1 : Math.min(1, dt * 1.2);
+    this.cam.dist += (target - this.cam.dist) * k;
     this.cam.x += ((x0 + x1) / 2 - this.cam.x) * k;
     this.cam.y += ((y0 + y1) / 2 - this.cam.y) * k;
-  }
-
-  private view(): { scale: number; ox: number; oy: number } {
     const c = this.app.renderer.domElement;
-    return { scale: this.cam.scale || 0.6, ox: c.clientWidth / 2, oy: c.clientHeight / 2 - 30 };
+    this.camera.aspect = (c.clientWidth || 1) / (c.clientHeight || 1);
+    const pitch = 0.95;
+    this.camera.position.set(this.cam.x, Math.sin(pitch) * this.cam.dist, this.cam.y + 60 + Math.cos(pitch) * this.cam.dist);
+    this.camera.lookAt(this.cam.x, 0, this.cam.y + 60);
+    this.camera.updateProjectionMatrix();
+    this.camera.updateMatrixWorld();
   }
 
   private screenToArena(sx: number, sy: number): [number, number] {
-    const { scale, ox, oy } = this.view();
-    return [this.cam.x + (sx - ox) / scale, this.cam.y + (sy - oy) / scale];
+    const c = this.app.renderer.domElement;
+    this.raycaster.setFromCamera(new THREE.Vector2((sx / c.clientWidth) * 2 - 1, -(sy / c.clientHeight) * 2 + 1), this.camera);
+    const p = new THREE.Vector3();
+    return this.raycaster.ray.intersectPlane(this.ground, p) ? [p.x, p.z] : [this.cam.x, this.cam.y];
   }
 
   // ---- effects ------------------------------------------------------------------------------
 
-  private spawnFx(x: number, y: number, color: number, size: number, life: number, grow: number, ring = false, opacity = 0.8): void {
-    const m = new THREE.Mesh(ring ? this.ringGeo : this.fxGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthTest: false }));
-    m.position.set(x, -y, 2);
-    m.scale.setScalar(size);
-    m.renderOrder = ring ? 8 : 60;
-    this.scene.add(m);
-    this.fx.push({ mesh: m, life, max: life, grow });
+  private smoke(x: number, y: number, z: number, color: number, size: number, life: number, opacity: number): void {
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.puff, color, transparent: true, opacity, depthWrite: false }));
+    sp.position.set(x, y, z);
+    sp.scale.setScalar(size);
+    this.scene.add(sp);
+    this.fx.push({ sprite: sp, life, max: life, grow: size * 1.2, rise: 6, opacity });
+  }
+
+  private splash(x: number, z: number): void {
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.puff, color: 0xffffff, transparent: true, opacity: 0.9, depthWrite: false }));
+    sp.position.set(x, 2, z);
+    sp.scale.set(6, 14, 1);
+    sp.center.set(0.5, 0);
+    this.scene.add(sp);
+    this.fx.push({ sprite: sp, life: 0.7, max: 0.7, grow: 8, rise: 0, opacity: 0.9 });
   }
 
   private onEvents(): void {
@@ -328,22 +341,21 @@ export class BattleScreen {
           const i = e.a;
           const pan = (s.bsX[i] / ARENA_W) * 2 - 1;
           audio.sfx(e.b > 12 ? 'cannon-20' : e.b > 5 ? 'cannon-10' : 'cannon-3', 0.8, pan);
-          // muzzle smoke along the firing side
           for (let k = 0; k < Math.min(6, e.b); k++) {
             const along = (k / 5 - 0.5) * s.bsLength[i] * 0.7;
             const hdg = s.bsHeading[i];
-            this.spawnFx(s.bsX[i] + Math.cos(hdg) * along, s.bsY[i] + Math.sin(hdg) * along, 0xd8d8d8, 9, 1.6, 14, false, 0.55);
+            this.smoke(s.bsX[i] + Math.cos(hdg) * along, 8, s.bsY[i] + Math.sin(hdg) * along, 0xe8e8e8, 10, 2.2, 0.75);
           }
           break;
         }
         case Ev.BattleHit: {
           const i = e.a;
           audio.sfx(Math.random() < 0.5 ? 'hit-1' : 'hit-2', 0.5, (s.bsX[i] / ARENA_W) * 2 - 1);
-          this.spawnFx(s.bsX[i] + (Math.random() - 0.5) * 20, s.bsY[i] + (Math.random() - 0.5) * 14, 0x5a4a3a, 6, 1.2, 10, false, 0.7);
+          this.smoke(s.bsX[i] + (Math.random() - 0.5) * 20, 10, s.bsY[i] + (Math.random() - 0.5) * 14, 0x6a5a48, 8, 1.4, 0.8);
           break;
         }
         case Ev.BattleSplash:
-          this.spawnFx(e.a, e.b, 0xffffff, 4, 0.7, 16, true, 0.85);
+          this.splash(e.a, e.b);
           if (this.splashCooldown <= 0) {
             audio.sfx(Math.random() < 0.5 ? 'splash-1' : 'splash-2', 0.25, (e.a / ARENA_W) * 2 - 1);
             this.splashCooldown = 0.15;
@@ -375,8 +387,8 @@ export class BattleScreen {
       ? `The pirates are beaten.${captured ? ` You captured ${captured} ship${captured > 1 ? 's' : ''}.` : ''} Their cargo is yours.`
       : result === 1 ? 'Your convoy was overwhelmed. The pirates take what they can carry.' : 'You broke away from the fight.';
     audio.sfx(result === 0 ? 'victory' : result === 1 ? 'defeat' : 'message');
-    this.root.append(h('div', { class: 'battle-banner parchment plain', style: 'pointer-events:auto' }, h('h1', null, title), h('p', null, text),
-      h('button', { class: 'btn', onclick: () => this.done() }, 'Continue')));
+    this.root.append(h('div', { class: 'battle-banner parchment', style: 'pointer-events:auto' }, h('h1', null, title), h('p', null, text),
+      h('button', { class: 'btn primary', onclick: () => this.done() }, 'Continue')));
     this.refreshHud();
   }
 
@@ -419,83 +431,66 @@ export class BattleScreen {
     const core = this.session.core;
     const s = core.s;
     this.updateCamera(dt);
-    const { scale, ox, oy } = this.view();
-    const c = this.app.renderer.domElement;
-    const cx = this.cam.x + (c.clientWidth / 2 - ox) / scale;
-    const cy = this.cam.y + (c.clientHeight / 2 - oy) / scale;
-    const hw = c.clientWidth / scale / 2, hh = c.clientHeight / scale / 2;
-    this.camera.left = cx - hw;
-    this.camera.right = cx + hw;
-    this.camera.top = -cy + hh;
-    this.camera.bottom = -cy - hh;
-    this.camera.updateProjectionMatrix();
-    if (this.waterMat) this.waterMat.uniforms.uTime.value = this.time;
-
+    if (this.waterMat) {
+      this.waterMat.uniforms.uTime.value = this.time;
+      this.waterMat.uniforms.uCam.value.copy(this.camera.position);
+    }
+    const wind = core.x.windDir();
     this.ships.forEach((g, i) => {
       const flags = s.bsFlags[i];
-      const frame = headingFrame(s.bsHeading[i]);
-      if (frame !== g.frame) {
-        g.frame = frame;
-        const [u0, v0, u1, v1] = frameUv(frame);
-        const uv = g.geo.attributes.uv as THREE.BufferAttribute;
-        uv.setXY(0, u0, v1);
-        uv.setXY(1, u1, v1);
-        uv.setXY(2, u0, v0);
-        uv.setXY(3, u1, v0);
-        uv.needsUpdate = true;
+      const sunk = (flags & BattleFlag.Sunk) !== 0;
+      // heel away from the wind when sailing across it
+      let rel = wind - s.bsHeading[i];
+      while (rel > Math.PI) rel -= Math.PI * 2;
+      while (rel < -Math.PI) rel += Math.PI * 2;
+      const targetHeel = Math.sin(rel) * 0.08 * Math.min(1, s.bsSpeed[i] / 40);
+      g.heel += (targetHeel - g.heel) * Math.min(1, dt * 2);
+      if (sunk) {
+        g.sink = Math.min(1, g.sink + dt * 0.18);
+        if (Math.random() < dt * 5 && g.sink < 0.8) this.smoke(s.bsX[i] + (Math.random() - 0.5) * 30, 10, s.bsY[i], 0x333333, 14, 2.5, 0.6);
       }
-      const mat = g.mesh.material as THREE.MeshBasicMaterial;
-      if (flags & BattleFlag.Sunk) {
-        g.sink = Math.min(1, g.sink + dt * 0.25);
-        mat.opacity = 1 - g.sink;
-        g.mesh.scale.setScalar(1 - g.sink * 0.3);
-        g.mesh.rotation.z = g.sink * 0.4;
-        if (Math.random() < dt * 6 && g.sink < 0.9) this.spawnFx(s.bsX[i] + (Math.random() - 0.5) * 30, s.bsY[i], 0x333333, 10, 2, 12, false, 0.5);
-      } else if (flags & BattleFlag.Captured) {
-        mat.color.setRGB(0.7, 0.7, 0.7);
-      }
-      if (flags & BattleFlag.Escaped) mat.opacity = Math.max(0, mat.opacity - dt);
-      const bob = Math.sin(this.time * 1.7 + i) * 1.5;
-      g.mesh.position.set(s.bsX[i], -s.bsY[i] + s.bsLength[i] * 0.35 + bob, 0);
-      g.mesh.renderOrder = 10 + s.bsY[i] / 100;
-      g.ring.position.set(s.bsX[i], -s.bsY[i], 0);
-      g.ring.visible = (flags & (BattleFlag.Sunk | BattleFlag.Escaped)) === 0;
+      const bob = Math.sin(this.time * 1.5 + i) * 1.2;
+      g.group.position.set(s.bsX[i], bob - g.sink * 40, s.bsY[i]);
+      g.group.rotation.set(g.heel + g.sink * 0.5, -s.bsHeading[i], Math.sin(this.time * 1.1 + i * 2) * 0.03 - g.sink * 0.35, 'YXZ');
+      g.group.visible = g.sink < 1 && !(flags & BattleFlag.Escaped);
+      g.ring.position.set(s.bsX[i], 0.8, s.bsY[i]);
+      g.ring.visible = (flags & (BattleFlag.Sunk | BattleFlag.Escaped | BattleFlag.Captured)) === 0;
       (g.ring.material as THREE.MeshBasicMaterial).opacity = i === this.flagship ? 0.95 : 0.45;
     });
 
-    // cannonballs
+    // cannonballs, flying in a shallow arc
     const m = new THREE.Matrix4();
     let n = 0;
     for (let b = 0; b < core.MAX_BALLS; b++) {
-      if (s.ballLife[b] <= 0) continue;
-      m.makeTranslation(s.ballX[b], -s.ballY[b], 3);
+      const life = s.ballLife[b];
+      if (life <= 0) continue;
+      m.makeTranslation(s.ballX[b], 6 + Math.min(18, life * 14), s.ballY[b]);
       this.balls.setMatrixAt(n++, m);
     }
     this.balls.count = n;
     this.balls.instanceMatrix.needsUpdate = true;
 
-    // effects
     for (let i = this.fx.length - 1; i >= 0; i--) {
       const f = this.fx[i];
       f.life -= dt;
       const k = 1 - f.life / f.max;
-      f.mesh.scale.setScalar(f.mesh.scale.x + f.grow * dt);
-      (f.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, (1 - k) * 0.75);
+      f.sprite.scale.x += f.grow * dt;
+      f.sprite.scale.y += f.grow * dt * (f.rise ? 1 : 0.4);
+      f.sprite.position.y += f.rise * dt;
+      f.sprite.material.opacity = Math.max(0, (1 - k) * f.opacity);
       if (f.life <= 0) {
-        this.scene.remove(f.mesh);
-        (f.mesh.material as THREE.Material).dispose();
+        this.scene.remove(f.sprite);
+        f.sprite.material.dispose();
         this.fx.splice(i, 1);
       }
     }
-    this.targetMarker.visible = !this.finished;
+    if (this.finished) this.targetMarker.visible = false;
     this.app.renderer.render(this.scene, this.camera);
   }
 
   dispose(): void {
     for (const [t, type, fn] of this.listeners) t.removeEventListener(type, fn);
     this.root.remove();
-    this.scene.traverse((o) => {
-      if (o instanceof THREE.Mesh) o.geometry !== this.fxGeo && o.geometry !== this.ringGeo && o.geometry.dispose();
-    });
+    for (const f of this.fx) f.sprite.material.dispose();
   }
 }

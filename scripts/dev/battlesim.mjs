@@ -2,11 +2,11 @@
 import { readFileSync } from 'node:fs';
 const { Core } = await import('../../src/core/core.ts');
 const { configureCore, newGame } = await import('../../src/core/world.ts');
-const data = JSON.parse(readFileSync('public/game/data/game.json', 'utf8'));
+const { world: data } = await import('../../src/data/world.ts');
 for (const [seed, ptype] of [[1, 5], [2, 8], [3, 0]]) {
   const core = await Core.load(readFileSync('src/wasm/build/core.wasm'));
-  configureCore(core, data, new Uint8Array(readFileSync('public/game/map/nav.bin')), seed);
-  const { convoy } = newGame(core, data, { startTown: 28, gold: 1000, ships: [{ type: ptype, name: 'x' }] });
+  configureCore(core, data, new Uint8Array(readFileSync('public/world/nav.bin')), seed);
+  const { convoy } = newGame(core, data, { startTown: 25, gold: 1000, ships: [{ type: ptype, name: 'x' }] });
   const pirate = core.x.spawnPirate();
   core.x.battleBegin();
   for (const sh of core.shipsOf(convoy)) core.x.battleAddShip(sh, 0, 380, 650, 0);

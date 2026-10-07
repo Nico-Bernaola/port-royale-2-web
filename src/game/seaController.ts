@@ -16,7 +16,7 @@ export class SeaController {
   private panelEl!: HTMLElement;
   private minimap!: HTMLCanvasElement;
   private overview = new Image();
-  private drag: { x: number; y: number; cx: number; cy: number; moved: boolean; button: number } | null = null;
+  private drag: { x: number; y: number; moved: boolean; button: number } | null = null;
   private keys = new Set<string>();
   private panelTimer = 0;
   private listSig = '';
@@ -78,7 +78,7 @@ export class SeaController {
     const hint = h(
       'div',
       { class: 'help-hint wood' },
-      'Left-click: select convoy · Right-click: sail there · Drag: scroll · Wheel: zoom · Click a town where your convoy lies to enter it',
+      'Left-click your ship to select it · Right-click the sea or a town to sail there · Drag to scroll · Wheel to zoom · Click a town where you are docked to go ashore',
     );
     this.root = h('div', { style: 'position:absolute;inset:0;pointer-events:none' }, top, this.convoyListEl, this.panelEl, mini, hint);
     for (const el of [top, this.convoyListEl, this.panelEl, mini]) el.style.pointerEvents = 'auto';
@@ -241,8 +241,7 @@ export class SeaController {
     ctx.fillStyle = '#0b2e4d';
     ctx.fillRect(0, 0, W, H);
     if (this.overview.complete && this.overview.naturalWidth) {
-      // the overview covers the full 20x15 tile grid (5120 x 3840 px)
-      ctx.drawImage(this.overview, 0, 0, (5120 * W) / this.view.mapW, H);
+      ctx.drawImage(this.overview, 0, 0, W, H);
     }
     const core = this.session.core;
     const s = core.s;
@@ -286,18 +285,15 @@ export class SeaController {
 
   private onDown(e: PointerEvent): void {
     if (this.app.screen !== 'sea') return;
-    this.drag = { x: e.clientX, y: e.clientY, cx: this.view.cx, cy: this.view.cy, moved: false, button: e.button };
+    this.drag = { x: e.clientX, y: e.clientY, moved: false, button: e.button };
+    this.view.dragStart(e.clientX, e.clientY);
   }
 
   private onMove(e: PointerEvent): void {
     if (!this.drag || this.app.screen !== 'sea') return;
     const dx = e.clientX - this.drag.x, dy = e.clientY - this.drag.y;
     if (Math.abs(dx) + Math.abs(dy) > 5) this.drag.moved = true;
-    if (this.drag.moved && this.drag.button !== 2) {
-      this.view.cx = this.drag.cx - dx / this.view.zoom;
-      this.view.cy = this.drag.cy - dy / this.view.zoom;
-      this.view.clampCamera();
-    }
+    if (this.drag.moved && this.drag.button !== 2) this.view.dragTo(e.clientX, e.clientY);
   }
 
   private onUp(e: PointerEvent): void {
@@ -343,8 +339,8 @@ export class SeaController {
     } else if (key === '1') this.setSpeed(1);
     else if (key === '2') this.setSpeed(2);
     else if (key === '3') this.setSpeed(4);
-    else if (key === '+' || key === '=') this.view.zoom *= 1.2;
-    else if (key === '-') this.view.zoom /= 1.2;
+    else if (key === '+' || key === '=') this.view.dist /= 1.2;
+    else if (key === '-') this.view.dist *= 1.2;
   }
 
   private onTown(t: number, button: number): void {
