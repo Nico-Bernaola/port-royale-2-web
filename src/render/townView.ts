@@ -505,9 +505,11 @@ export class TownView {
     // ---- market square with the town hall, church and governor's house around it
     const mk = this.place('market', 'Market', market(pal, rnd), 0, 72);
     const mv = this.vOf(mk.group);
-    this.place('townhall', 'Town hall', mansion(pal, false), 0, mv - this.shoreV(0) + 46, 0, false, 4);
+    // one seat of government at the head of the square: the governor's house in governor and
+    // viceroy towns, a modest town hall in colonies
+    if (this.town.rank !== 'colony') this.place('governor', "Governor's house", mansion(pal, true), 0, mv - this.shoreV(0) + 50, 0, false, 8);
+    else this.place('townhall', 'Town hall', mansion(pal, false), 0, mv - this.shoreV(0) + 46, 0, false, 4);
     this.place('church', 'Church', church(pal), -68, mv - this.shoreV(-68) + 22, -Math.PI / 2, false, 5);
-    if (this.town.rank !== 'colony') this.place('governor', "Governor's house", mansion(pal, true), 86, mv - this.shoreV(86) + 38, 0, false, 8);
 
     // ---- cottages along a street grid
     this.cottages(big, mv);

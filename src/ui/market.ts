@@ -194,7 +194,7 @@ export function openTownHall(ctx: PortContext): void {
   });
   const rank = t.rank === 'viceroy' ? 'Seat of the Viceroy' : t.rank === 'governor' ? 'Governor town' : 'Colony';
   modal(
-    `Town hall of ${t.name}`,
+    t.rank === 'colony' ? `Town hall of ${t.name}` : `Governor's house, ${t.name}`,
     h('div', { style: 'min-width:520px' },
       h('div', { class: 'row', style: 'gap:24px;font-size:16px;margin-bottom:8px' },
         h('span', null, h('b', null, t.nation), ` · ${rank}`),

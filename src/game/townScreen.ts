@@ -77,7 +77,7 @@ export class TownScreen {
         btn('Shipyard', '⚒', () => openShipyard(this.ctx), 'Buy, commission and repair ships'),
         btn('Harbour', '⚓', () => openHarbour(this.ctx), 'Form and manage convoys'),
         btn('Tavern', '🍺', () => openTavern(this.ctx), 'Hire sailors, hear trade rumours'),
-        btn('Town hall', '🏛', () => openTownHall(this.ctx), 'What the town makes and needs'),
+        btn(def.rank === 'colony' ? 'Town hall' : 'Governor', '🏛', () => openTownHall(this.ctx), 'What the town makes and needs'),
         h('button', { class: 'btn town-btn sail', onclick: () => this.leave(), title: 'Back to the sea map' }, h('span', { class: 'ico' }, '⛵'), 'Set sail')),
       h('div', { class: 'help-hint wood', id: 'town-hint', style: 'bottom:auto;top:auto;bottom:96px' }, 'Click a building to visit it · drag to look around · wheel to zoom · Q/E or right-drag to rotate'),
       this.tip,
