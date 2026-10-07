@@ -1,4 +1,5 @@
 /** Procedural audio: synthesized sound effects, ambience and a small generative tune. */
+import { settings } from './settings.ts';
 
 type Track = 'menu' | 'sea' | 'town' | 'battle' | 'market' | 'tavern' | 'governor';
 
@@ -11,6 +12,7 @@ class AudioManager {
   private master!: GainNode;
   private musicBus!: GainNode;
   private ambBus!: GainNode;
+  private sfxBus!: GainNode;
   private noise!: AudioBuffer;
   private current: Track | null = null;
   private ambience: AudioScheduledSourceNode[] = [];
@@ -22,12 +24,11 @@ class AudioManager {
     if (!this.ctx) {
       this.ctx = new AudioContext();
       this.master = this.ctx.createGain();
-      this.master.gain.value = 0.8;
       this.master.connect(this.ctx.destination);
       this.musicBus = this.ctx.createGain();
-      this.musicBus.gain.value = 0.16;
       this.ambBus = this.ctx.createGain();
-      this.ambBus.gain.value = 0.35;
+      this.sfxBus = this.ctx.createGain();
+      this.sfxBus.connect(this.master);
       // a simple feedback delay for space
       const delay = this.ctx.createDelay(1);
       delay.delayTime.value = 0.33;
@@ -38,6 +39,7 @@ class AudioManager {
       delay.connect(fb).connect(delay);
       delay.connect(this.master);
       this.ambBus.connect(this.master);
+      this.applySettings();
       const len = this.ctx.sampleRate * 2;
       this.noise = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
       const d = this.noise.getChannelData(0);
@@ -63,9 +65,14 @@ class AudioManager {
     window.addEventListener('keydown', go);
   }
 
-  setMuted(m: boolean): void {
-    this.muted = m;
-    if (this.ctx) this.master.gain.value = m ? 0 : 0.8;
+  /** Apply the volume settings; the old fixed mix is the 100% point of each slider. */
+  applySettings(): void {
+    this.muted = settings.muted;
+    if (!this.ctx) return;
+    this.master.gain.value = settings.muted ? 0 : settings.master;
+    this.musicBus.gain.value = 0.2 * settings.music;
+    this.ambBus.gain.value = 0.5 * settings.ambience;
+    this.sfxBus.gain.value = settings.effects / 0.8;
   }
 
   // ---- building blocks ----------------------------------------------------------------------
@@ -86,7 +93,7 @@ class AudioManager {
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     const p = c.createStereoPanner();
     p.pan.value = Math.max(-1, Math.min(1, pan));
-    src.connect(f).connect(g).connect(p).connect(dest ?? this.master);
+    src.connect(f).connect(g).connect(p).connect(dest ?? this.sfxBus);
     src.start(t, Math.random());
     src.stop(t + dur + 0.05);
     return src;
@@ -103,7 +110,7 @@ class AudioManager {
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(gain, t + 0.015);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g).connect(dest ?? this.master);
+    o.connect(g).connect(dest ?? this.sfxBus);
     o.start(t);
     o.stop(t + dur + 0.05);
   }

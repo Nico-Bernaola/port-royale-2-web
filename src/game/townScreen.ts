@@ -1,4 +1,5 @@
 /** Port screen: 3D harbour town, building interaction and the port dialogs. */
+import { settings } from '../settings.ts';
 import { audio } from '../audio.ts';
 import { flagUrl } from '../assets.ts';
 import { CvState } from '../core/core.ts';
@@ -68,7 +69,8 @@ export class TownScreen {
         h('div', { class: 'stat' }, '📅 ', this.dateEl),
         h('div', { class: 'stat' }, '💰 ', this.goldEl),
         h('div', { class: 'spacer' }),
-        h('button', { class: 'btn small', onclick: () => { session.save(); toast('Game saved.'); } }, 'Save')),
+        h('button', { class: 'btn small', onclick: () => { session.save(); toast('Game saved.'); } }, 'Save'),
+        h('button', { class: 'btn small', title: 'Settings', onclick: () => app.openSettings() }, '⚙')),
       h('div', { class: 'town-title wood' }, h('img', { src: flagUrl(def.nation), alt: '' }), def.name,
         h('span', { class: 'sub' }, ` ${def.rank === 'viceroy' ? 'Seat of the Viceroy' : def.rank === 'governor' ? 'Governor town' : 'Colony'} · ${fmt(session.core.s.townPop[town])} inhabitants`)),
       h('div', { class: 'town-bar wood', style: 'pointer-events:auto' },
@@ -84,7 +86,8 @@ export class TownScreen {
       h('div', { class: 'loading', id: 'town-loading', style: 'pointer-events:auto' }, h('div', { class: 'msg' }, `Entering ${def.name}...`)),
     );
     uiRoot().append(this.root);
-    setTimeout(() => document.getElementById('town-hint')?.remove(), 9000);
+    if (settings.hints) setTimeout(() => document.getElementById('town-hint')?.remove(), 9000);
+    else document.getElementById('town-hint')?.remove();
     this.refresh();
     void this.view.load().then(() => {
       this.ready = true;

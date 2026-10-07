@@ -2,6 +2,7 @@
  * A running campaign: the WASM core plus host-side state the core does not need to know
  * (names, selection, game speed), save/load, and event fan-out to the views.
  */
+import { settings } from '../settings.ts';
 import { Core, CvState, Ev, Owner, type CoreEvent } from '../core/core.ts';
 import type { GameData } from '../core/data.ts';
 import { configureCore, newGame } from '../core/world.ts';
@@ -55,7 +56,7 @@ export class Session {
   selected = -1;
   /** game days per real second at speed 1 */
   readonly daysPerSecond = 1 / 8;
-  speed = 1;
+  speed: number = settings.startSpeed;
   paused = false;
   /** blocks time while a modal flow (battle, dialog) is open */
   holds = 0;
@@ -127,6 +128,9 @@ export class Session {
       for (const s of this.core.harbourShips(t)) cost += this.data.ships[this.core.s.shType[s]].upkeep * 0.5;
     }
     this.core.x.setGold(this.core.x.gold() - cost);
+    if (settings.autosaveDays && Math.floor(today) % settings.autosaveDays === 0) {
+      try { this.save(); } catch { /* storage full: skip this autosave */ }
+    }
   }
 
   playerConvoys(): number[] {

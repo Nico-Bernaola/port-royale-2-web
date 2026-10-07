@@ -5,6 +5,7 @@
  *
  * Map coordinates are pixels (x right, y down). World space: x = map x, z = map y, y = up.
  */
+import { settings } from '../settings.ts';
 import * as THREE from 'three';
 import { CvState, Owner } from '../core/core.ts';
 import type { Session } from '../game/session.ts';
@@ -88,6 +89,7 @@ export class SeaMapView {
     tex.magFilter = THREE.LinearFilter;
     tex.generateMipmaps = false;
     this.terrainMat = new THREE.ShaderMaterial({
+      defines: settings.water === 'simple' ? { SIMPLE_WATER: 1 } : {},
       uniforms: {
         uT: { value: tex },
         uMap: { value: new THREE.Vector2(this.mapW, this.mapH) },
@@ -140,9 +142,15 @@ export class SeaMapView {
             // animated wave normal from two scrolling noise layers
             vec2 p = vPos.xz * 0.045;
             float e = 0.35;
+            #ifdef SIMPLE_WATER
+            float n0 = fbm3(p + uTime * vec2(0.20, 0.12));
+            float nx = fbm3(p + vec2(e, 0.0) + uTime * vec2(0.20, 0.12));
+            float nz = fbm3(p + vec2(0.0, e) + uTime * vec2(0.20, 0.12));
+            #else
             float n0 = fbm3(p + uTime * vec2(0.20, 0.12)) + 0.5 * fbm3(p * 2.3 - uTime * vec2(0.15, 0.25));
             float nx = fbm3(p + vec2(e, 0.0) + uTime * vec2(0.20, 0.12)) + 0.5 * fbm3((p + vec2(e, 0.0)) * 2.3 - uTime * vec2(0.15, 0.25));
             float nz = fbm3(p + vec2(0.0, e) + uTime * vec2(0.20, 0.12)) + 0.5 * fbm3((p + vec2(0.0, e)) * 2.3 - uTime * vec2(0.15, 0.25));
+            #endif
             vec3 N = normalize(vec3((n0 - nx) * 2.2, 1.0, (n0 - nz) * 2.2));
             float diff = clamp(dot(N, uSun), 0.0, 1.0);
             vec3 H = normalize(uSun + V);
@@ -177,7 +185,7 @@ export class SeaMapView {
         }`,
     });
     // one big terrain patch; the mesh is denser than the half-res distance field
-    const geo = new THREE.PlaneGeometry(this.mapW, this.mapH, 560, 410);
+    const geo = new THREE.PlaneGeometry(this.mapW, this.mapH, ...(settings.townDetail === 'high' ? [560, 410] : [300, 220]));
     geo.rotateX(-Math.PI / 2);
     const mesh = new THREE.Mesh(geo, this.terrainMat);
     mesh.position.set(this.mapW / 2, 0, this.mapH / 2);

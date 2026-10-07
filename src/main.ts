@@ -12,6 +12,9 @@ import { SeaController } from './game/seaController.ts';
 import { TownScreen } from './game/townScreen.ts';
 import { BattleScreen } from './game/battleScreen.ts';
 import { clear, h, modal, toast, uiRoot } from './ui/dom.ts';
+import { onSettingsChange, settings } from './settings.ts';
+import { startTexturePainting } from './render/town/textures.ts';
+import { openSettings } from './ui/settings.ts';
 
 export type Screen = 'menu' | 'sea' | 'town' | 'battle';
 
@@ -27,14 +30,47 @@ export class App {
   battle: BattleScreen | null = null;
   screen: Screen = 'menu';
   private last = performance.now();
+  private lastDrawn = 0;
+  private fpsEl: HTMLElement | null = null;
+  private fpsFrames = 0;
+  private fpsSince = performance.now();
 
   constructor() {
     const canvas = document.getElementById('view') as HTMLCanvasElement;
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: settings.antialias, alpha: false, powerPreference: 'high-performance' });
+    this.applyPixelRatio();
     this.resize();
     window.addEventListener('resize', () => this.resize());
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    this.applyLiveSettings();
+    onSettingsChange((_s, changed) => {
+      if (changed.includes('renderScale')) { this.applyPixelRatio(); this.resize(); }
+      if (changed.includes('textureRes')) void startTexturePainting(settings.textureRes);
+      this.applyLiveSettings();
+    });
+  }
+
+  private applyPixelRatio(): void {
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2) * settings.renderScale);
+  }
+
+  /** Settings that take effect immediately: sound, interface size, frame-rate overlay. */
+  private applyLiveSettings(): void {
+    audio.applySettings();
+    document.documentElement.style.setProperty('--ui-scale', String(settings.uiScale));
+    document.body.classList.toggle('no-tags', !settings.buildingTags);
+    document.body.classList.toggle('no-tips', !settings.tooltips);
+    if (settings.showFps && !this.fpsEl) {
+      this.fpsEl = h('div', { class: 'fps-meter' });
+      document.body.append(this.fpsEl);
+    } else if (!settings.showFps && this.fpsEl) {
+      this.fpsEl.remove();
+      this.fpsEl = null;
+    }
+  }
+
+  openSettings(): void {
+    openSettings();
   }
 
   private resize(): void {
@@ -45,6 +81,8 @@ export class App {
   async boot(): Promise<void> {
     registerStyleAssets();
     audio.unlock();
+    // paint the town textures in a background worker while the world loads
+    void startTexturePainting(settings.textureRes);
     const loading = this.loadingScreen('Charting the Caribbean...');
     try {
       const [core, nav] = await Promise.all([Core.load(fetch(wasmUrl)), fetchBytes(worldUrl('nav.bin'))]);
@@ -70,8 +108,23 @@ export class App {
   }
 
   private frame(t: number): void {
+    // frame-rate cap: skip frames that come too soon
+    if (settings.maxFps && t - this.lastDrawn < 1000 / settings.maxFps - 2) {
+      requestAnimationFrame((tt) => this.frame(tt));
+      return;
+    }
+    this.lastDrawn = t;
     const dt = Math.min(0.1, (t - this.last) / 1000);
     this.last = t;
+    if (this.fpsEl) {
+      this.fpsFrames++;
+      if (t - this.fpsSince > 500) {
+        const info = this.renderer.info.render;
+        this.fpsEl.textContent = `${Math.round((this.fpsFrames * 1000) / (t - this.fpsSince))} fps · ${info.calls} draws · ${(info.triangles / 1000).toFixed(0)}k tris`;
+        this.fpsFrames = 0;
+        this.fpsSince = t;
+      }
+    }
     if (this.session) {
       if (this.screen === 'sea' || this.screen === 'town') this.session.update(dt);
     }
@@ -124,6 +177,7 @@ export class App {
       h('button', { class: 'btn', onclick: () => this.showNewGame() }, 'New Game'),
       h('button', { class: 'btn', disabled: !canContinue, onclick: () => void this.continueGame() }, 'Continue'),
       h('button', { class: 'btn', onclick: () => this.showAbout() }, 'How to play'),
+      h('button', { class: 'btn', onclick: () => this.openSettings() }, 'Settings'),
     );
     ui.append(h('div', { class: 'menu-screen', id: 'menu' }, box, h('div', { class: 'menu-foot' }, 'Inspired by Port Royale 2 · simulation in WebAssembly, graphics in WebGL · coastlines from Natural Earth')));
   }
@@ -205,6 +259,7 @@ export class App {
     session.notes.add((n) => {
       if (n.kind === 'shipReady') {
         audio.sfx('dock');
+        if (settings.pauseOnEvents && this.screen === 'sea') this.seaCtl?.pause();
         toast(`The ${n.order.name} has been launched in ${this.data.towns[n.order.town].name} and waits in the harbour.`, 6000);
         if (this.town?.town === n.order.town) this.enterTown(n.order.town);
       }
@@ -226,6 +281,7 @@ export class App {
     } else if (e.type === Ev.Arrived && s.isPlayerConvoy(e.a)) {
       if (e.b >= 0) {
         audio.sfx('dock', 0.8);
+        if (settings.pauseOnEvents && this.screen === 'sea') this.seaCtl?.pause();
         toast(`${s.convoyName(e.a)} has arrived in ${this.data.towns[e.b].name}.`);
       } else toast(`${s.convoyName(e.a)} has reached its destination.`);
     } else if (e.type === Ev.PathFailed && s.isPlayerConvoy(e.a)) {

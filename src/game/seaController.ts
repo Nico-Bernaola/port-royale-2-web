@@ -1,4 +1,5 @@
 /** Sea-map interaction: input, HUD, convoy list/details and minimap. */
+import { settings } from '../settings.ts';
 import { audio } from '../audio.ts';
 import { CvState, Owner } from '../core/core.ts';
 import type { App } from '../main.ts';
@@ -86,12 +87,18 @@ export class SeaController {
     this.listSig = '';
     this.setSpeed(this.session.paused ? 0 : this.session.speed);
     this.refreshPanel();
-    setTimeout(() => hint.remove(), 12000);
+    if (settings.hints) setTimeout(() => hint.remove(), 12000);
+    else hint.remove();
   }
 
   detachUi(): void {
     this.root?.remove();
     this.root = null;
+  }
+
+  /** Pause the game (used when an event needs the player's attention). */
+  pause(): void {
+    this.setSpeed(0);
   }
 
   private setSpeed(v: number): void {
@@ -123,7 +130,7 @@ export class SeaController {
         'div',
         { class: 'col', style: 'width:260px' },
         h('button', { class: 'btn', onclick: () => { this.save(); m.close(); } }, 'Save game'),
-        h('button', { class: 'btn', onclick: () => { audio.setMuted(!audio.muted); m.close(); } }, audio.muted ? 'Sound on' : 'Sound off'),
+        h('button', { class: 'btn', onclick: () => { m.close(); this.app.openSettings(); } }, 'Settings'),
         h('button', { class: 'btn', onclick: () => { m.close(); this.app.showMainMenu(); } }, 'Quit to main menu'),
       ),
       { plain: true },

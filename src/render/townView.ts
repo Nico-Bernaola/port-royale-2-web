@@ -6,6 +6,7 @@
  * is placed by checking its whole footprint against the actual shoreline, so nothing ends up
  * in the sea. Units are metres.
  */
+import { settings } from '../settings.ts';
 import * as THREE from 'three';
 import type { TownDef } from '../core/data.ts';
 import { NOISE, SUN_DIR } from './glsl.ts';
@@ -14,7 +15,7 @@ import type { TerrainSampler } from './terrain.ts';
 import { type Blueprint, church, cottagePrototype, hullFrame, mansion, market, PALETTES, type Palette, pier, shipyard, tavern, warehouse } from './town/buildings.ts';
 import { Kit } from './town/kit.ts';
 import { Vegetation } from './town/nature.ts';
-import { buildingFlag, detailTexture, material, mulberry, roadTexture } from './town/textures.ts';
+import { buildingFlag, detailTexture, material, mulberry, roadTexture, texturesReady } from './town/textures.ts';
 
 export type BuildingKind = 'market' | 'shipyard' | 'tavern' | 'harbour' | 'townhall' | 'church' | 'governor' | 'warehouse' | 'decor';
 
@@ -25,6 +26,21 @@ export interface Building {
 }
 
 const SIZE = 900; // half-size of the town area in metres
+
+/** The town coastline in GLSL; must match TownView.coast(). Needs uniforms uN and uSeed. */
+const COAST_GLSL = /* glsl */ `
+  uniform vec2 uN;
+  uniform float uSeed;
+  float coastD(vec2 p) {
+    float along = -p.x * uN.y + p.y * uN.x;
+    float off = p.x * uN.x + p.y * uN.y;
+    float calm = 0.25 + 0.75 * smoothstep(160.0, 420.0, abs(along));
+    float wob = (sin(along * 0.008 + uSeed) * 70.0 + sin(along * 0.021 + uSeed * 3.0) * 28.0 + sin(along * 0.05 + uSeed * 7.0) * 8.0) * calm;
+    float q = along / 220.0;
+    float bay = -60.0 * exp(-q * q * q * q);
+    return -(off - wob - bay);
+  }
+`;
 const GROUND_PX = 2048;
 
 const smooth = (e0: number, e1: number, x: number) => {
@@ -37,14 +53,6 @@ function hash(x: number, y: number): number {
   h = Math.imul(h ^ (h >>> 13), 1103515245);
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
-function vnoise(x: number, y: number): number {
-  const ix = Math.floor(x), iy = Math.floor(y);
-  const fx = x - ix, fy = y - iy;
-  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
-  const a = hash(ix, iy), b = hash(ix + 1, iy), c = hash(ix, iy + 1), d = hash(ix + 1, iy + 1);
-  return (a + (b - a) * ux) * (1 - uy) + (c + (d - c) * ux) * uy;
-}
-const fbm = (x: number, y: number) => vnoise(x, y) * 0.5 + vnoise(x * 2.1 + 5, y * 2.1 + 3) * 0.3 + vnoise(x * 4.3 + 9, y * 4.3 + 1) * 0.2;
 
 interface Footprint { x: number; z: number; hx: number; hz: number; rot: number; pad: number }
 
@@ -135,19 +143,19 @@ export class TownView {
     this.prevExposure = this.renderer.toneMappingExposure;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
-    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.enabled = settings.shadows > 0;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     this.sun = new THREE.DirectionalLight(0xfff1dc, 2.9);
-    this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(4096, 4096);
+    this.sun.castShadow = settings.shadows > 0;
+    this.sun.shadow.mapSize.set(settings.shadows || 1024, settings.shadows || 1024);
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.04;
     this.scene.add(this.sun, this.sun.target, new THREE.HemisphereLight(0xd6eaff, 0x8a7a52, 1.15));
 
     this.buildSky();
-    // yield so the loading message paints before the heavy work
-    await new Promise((r) => setTimeout(r, 30));
+    // textures are painted in the background from boot; wait for any still in progress
+    await Promise.race([texturesReady(), new Promise((r) => setTimeout(r, 8000))]);
     this.layout();
     this.buildRoads();
     this.buildTerrain();
@@ -183,7 +191,7 @@ export class TownView {
   }
 
   private buildTerrain(): void {
-    const geo = new THREE.PlaneGeometry(SIZE * 2, SIZE * 2, 240, 240);
+    const geo = new THREE.PlaneGeometry(SIZE * 2, SIZE * 2, settings.townDetail === 'high' ? 240 : 150, settings.townDetail === 'high' ? 240 : 150);
     geo.rotateX(-Math.PI / 2);
     const p = geo.attributes.position as THREE.BufferAttribute;
     for (let i = 0; i < p.count; i++) p.setY(i, this.height(p.getX(i), p.getZ(i)));
@@ -192,9 +200,31 @@ export class TownView {
     const mat = new THREE.MeshStandardMaterial({ map: this.paintGround(), roughness: 1 });
     mat.onBeforeCompile = (sh) => {
       sh.uniforms.uDetail = { value: detail };
+      sh.uniforms.uN = { value: new THREE.Vector2(this.nx, this.nz) };
+      sh.uniforms.uSeed = { value: this.seed };
+      sh.vertexShader = sh.vertexShader
+        .replace('void main() {', 'varying vec3 vGround;\nvoid main() {')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vGround = (modelMatrix * vec4(transformed, 1.0)).xyz;');
       sh.fragmentShader = sh.fragmentShader
-        .replace('void main() {', 'uniform sampler2D uDetail;\nvoid main() {')
-        .replace('#include <map_fragment>', `#include <map_fragment>
+        .replace('void main() {', `uniform sampler2D uDetail;
+          varying vec3 vGround;
+          ${NOISE}
+          ${COAST_GLSL}
+          vec3 lin(vec3 c) { return pow(c, vec3(2.2)); }
+          vec3 groundColour(vec3 p) {
+            float d = coastD(p.xz);
+            float n1 = fbm(p.xz * 0.02), n2 = fbm(p.xz * 0.006 + 40.0);
+            if (d < 0.0) return mix(lin(vec3(0.66, 0.59, 0.43)), lin(vec3(0.54, 0.52, 0.40)), smoothstep(0.0, 90.0, -d));
+            vec3 g = mix(lin(vec3(0.47, 0.53, 0.23)), lin(vec3(0.34, 0.40, 0.17)), n1);
+            g = mix(g, lin(vec3(0.60, 0.59, 0.31)), smoothstep(0.55, 0.75, n2) * 0.8);
+            g = mix(g, lin(vec3(0.27, 0.33, 0.16)), smoothstep(14.0, 30.0, p.y) * 0.8);
+            g = mix(g, lin(vec3(0.55, 0.52, 0.44)), clamp((n1 - 0.72) * 2.0, 0.0, 1.0));
+            vec3 c = mix(lin(vec3(0.80, 0.73, 0.55)), g, smoothstep(3.0 + n1 * 8.0, 15.0, d));
+            return c * (0.92 + 0.16 * vnoise(p.xz * 0.4));
+          }
+          void main() {`)
+        .replace('#include <map_fragment>', `vec4 over = texture2D(map, vMapUv);
+          diffuseColor.rgb *= mix(groundColour(vGround), over.rgb, over.a);
           diffuseColor.rgb *= 0.62 + 0.76 * texture2D(uDetail, vMapUv * 900.0).r;
           diffuseColor.rgb *= 0.8 + 0.4 * texture2D(uDetail, vMapUv * 97.0).r;`);
     };
@@ -203,44 +233,12 @@ export class TownView {
     this.scene.add(m);
   }
 
-  /** Paint the ground: sand, grass, dirt around buildings, streets and fields. */
+  /** The hand-drawn part of the ground (fields, verges, trodden earth) on a transparent canvas; the shader adds sand and grass. */
   private paintGround(): THREE.CanvasTexture {
-    const N = GROUND_PX;
+    const N = settings.textureRes >= 512 ? GROUND_PX : GROUND_PX / 2;
     const c = document.createElement('canvas');
     c.width = c.height = N;
     const g = c.getContext('2d')!;
-    const img = g.createImageData(N, N);
-    const C = (h: number) => [(h >> 16) & 255, (h >> 8) & 255, h & 255];
-    const wet = C(0xa8966e), deepSand = C(0x8a8466), sand = C(0xcdb98c), grassA = C(0x77863a), grassB = C(0x56652b), dry = C(0x989650), forest = C(0x46552a), rock = C(0x8c8470);
-    const col = [0, 0, 0];
-    const lerp = (a: number[], b: number[], t: number) => { col[0] = a[0] + (b[0] - a[0]) * t; col[1] = a[1] + (b[1] - a[1]) * t; col[2] = a[2] + (b[2] - a[2]) * t; };
-    const tmp = [0, 0, 0];
-    for (let r = 0; r < N; r++) {
-      const z = -SIZE + ((r + 0.5) / N) * SIZE * 2;
-      for (let q = 0; q < N; q++) {
-        const x = -SIZE + ((q + 0.5) / N) * SIZE * 2;
-        const d = this.coast(x, z);
-        const n1 = fbm(x * 0.02, z * 0.02), n2 = fbm(x * 0.006 + 40, z * 0.006);
-        if (d < 0) {
-          lerp(wet, deepSand, smooth(0, 90, -d));
-        } else if (d < 26) {
-          lerp(sand, grassA, smooth(3 + n1 * 8, 15, d));
-        } else {
-          lerp(grassA, grassB, n1);
-          tmp[0] = col[0]; tmp[1] = col[1]; tmp[2] = col[2];
-          if (n2 > 0.55) lerp(tmp, dry, smooth(0.55, 0.75, n2) * 0.8);
-          tmp[0] = col[0]; tmp[1] = col[1]; tmp[2] = col[2];
-          const h = this.height(x, z);
-          if (h > 14) lerp(tmp, forest, smooth(14, 30, h) * 0.8);
-          tmp[0] = col[0]; tmp[1] = col[1]; tmp[2] = col[2];
-          if (n1 > 0.72) lerp(tmp, rock, (n1 - 0.72) * 2);
-        }
-        const o = (r * N + q) * 4;
-        const f = 0.92 + 0.16 * vnoise(x * 0.4, z * 0.4);
-        img.data[o] = col[0] * f; img.data[o + 1] = col[1] * f; img.data[o + 2] = col[2] * f; img.data[o + 3] = 255;
-      }
-    }
-    g.putImageData(img, 0, 0);
     const s = N / (SIZE * 2);
     const at = (x: number, z: number): [number, number] => [(x + SIZE) * s, (z + SIZE) * s];
     const place = (fp: Footprint) => {
@@ -351,6 +349,7 @@ export class TownView {
 
   private buildWater(): void {
     this.waterMat = new THREE.ShaderMaterial({
+      defines: settings.water === 'simple' ? { SIMPLE_WATER: 1 } : {},
       transparent: true,
       fog: true,
       uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
@@ -364,27 +363,24 @@ export class TownView {
         }`,
       fragmentShader: /* glsl */ `
         varying vec3 vP;
-        uniform float uTime, uSeed;
+        uniform float uTime;
         uniform vec3 uSun, uCam;
-        uniform vec2 uN;
         #include <fog_pars_fragment>
         ${NOISE}
-        float coastD(vec2 p) {
-          float along = -p.x * uN.y + p.y * uN.x;
-          float off = p.x * uN.x + p.y * uN.y;
-          float calm = 0.25 + 0.75 * smoothstep(160.0, 420.0, abs(along));
-          float wob = (sin(along * 0.008 + uSeed) * 70.0 + sin(along * 0.021 + uSeed * 3.0) * 28.0 + sin(along * 0.05 + uSeed * 7.0) * 8.0) * calm;
-          float q = along / 220.0;
-          float bay = -60.0 * exp(-q * q * q * q);
-          return -(off - wob - bay);
-        }
+        ${COAST_GLSL}
         void main() {
           vec2 p = vP.xz * 0.05;
           float e = 0.3;
           vec2 f1 = uTime * vec2(0.3, 0.2);
+          #ifdef SIMPLE_WATER
+          float n0 = fbm3(p + f1);
+          float nx = fbm3(p + vec2(e, 0.0) + f1);
+          float nz = fbm3(p + vec2(0.0, e) + f1);
+          #else
           float n0 = fbm3(p + f1) + 0.5 * fbm3(p * 2.5 - uTime * 0.3);
           float nx = fbm3(p + vec2(e, 0.0) + f1) + 0.5 * fbm3((p + vec2(e, 0.0)) * 2.5 - uTime * 0.3);
           float nz = fbm3(p + vec2(0.0, e) + f1) + 0.5 * fbm3((p + vec2(0.0, e)) * 2.5 - uTime * 0.3);
+          #endif
           vec3 N = normalize(vec3((n0 - nx) * 1.4, 1.0, (n0 - nz) * 1.4));
           vec3 V = normalize(uCam - vP);
           vec3 H = normalize(uSun + V);
@@ -592,7 +588,7 @@ export class TownView {
 
   private cottages(big: number, mv: number): void {
     const rnd = this.rnd;
-    const count = [46, 80, 120][big];
+    const count = Math.round([46, 80, 120][big] * (settings.townDetail === 'high' ? 1 : 0.7));
     const protos: { geos: Map<string, THREE.BufferGeometry>; half: [number, number]; mats: THREE.Matrix4[] }[] = [];
     for (let v = 0; v < 3; v++) for (let s = 0; s < 2; s++) protos.push({ ...cottagePrototype(this.pal, v, 1 + v * 17 + s * 101), mats: [] });
     const plinths: THREE.Matrix4[] = [];
@@ -681,7 +677,9 @@ export class TownView {
       const t = Math.max(0, Math.min(1, ((u - u0) * dx + (v - v0) * dv) / (dx * dx + dv * dv || 1)));
       return Math.hypot(u - (u0 + dx * t), v - (v0 + dv * t)) < 4.5;
     });
-    const tryPut = (n: number, fn: (x: number, y: number, z: number, d: number, u: number, v: number) => boolean) => {
+    const density = settings.vegetation;
+    const tryPut = (n0: number, fn: (x: number, y: number, z: number, d: number, u: number, v: number) => boolean) => {
+      const n = Math.round(n0 * density);
       for (let k = 0; k < n; k++) {
         const u = (rnd() - 0.5) * 1700, v = shore - 20 + rnd() * 900;
         const [x, z] = this.frame(u, v);
@@ -733,7 +731,7 @@ export class TownView {
       return [f.x + lx * cs + lz * sn, f.z - lx * sn + lz * cs];
     };
     for (const f of this.footprints) {
-      const n = 7 + Math.floor(rnd() * 7);
+      const n = Math.round((7 + Math.floor(rnd() * 7)) * density);
       for (let i = 0; i < n; i++) {
         const side = Math.floor(rnd() * 4);
         const t = rnd() * 2 - 1;
@@ -760,7 +758,7 @@ export class TownView {
         continue;
       }
       for (let l = 0; l < len; l += 1.5 + rnd() * 2.5) for (const sd of [-1, 1]) {
-        if (rnd() < 0.3) continue;
+        if (rnd() < 1 - 0.7 * density) continue;
         const o = 3.3 + rnd() * 1.4;
         const [x, z] = this.frame(u0 + du * l - dv * sd * o, v0 + dv * l + du * sd * o);
         if (this.coast(x, z) < 4 || !this.clearOfBuildings(x, z, 0.3)) continue;

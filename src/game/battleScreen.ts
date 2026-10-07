@@ -3,6 +3,7 @@
  * (procedural ships, wave-shaded water, smoke and splashes) and maps player input to the
  * core's battle commands. Arena units: x = east, z = south, y = up.
  */
+import { settings } from '../settings.ts';
 import * as THREE from 'three';
 import { audio } from '../audio.ts';
 import { Ammo, BattleFlag, Ev } from '../core/core.ts';
@@ -61,7 +62,7 @@ export class BattleScreen {
   private raycaster = new THREE.Raycaster();
   private ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   private time = 0;
-  private speed = 1;
+  private speed: number = settings.battleSpeed;
   private flagship = 0;
   private finished = false;
   private autoFire = true;
