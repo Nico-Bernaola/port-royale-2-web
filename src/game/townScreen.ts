@@ -79,11 +79,12 @@ export class TownScreen {
         btn('Tavern', '🍺', () => openTavern(this.ctx), 'Hire sailors, hear trade rumours'),
         btn('Town hall', '🏛', () => openTownHall(this.ctx), 'What the town makes and needs'),
         h('button', { class: 'btn town-btn sail', onclick: () => this.leave(), title: 'Back to the sea map' }, h('span', { class: 'ico' }, '⛵'), 'Set sail')),
-      h('div', { class: 'help-hint wood', style: 'bottom:auto;top:58px' }, 'Click a building to visit it · drag to look around · wheel to zoom · Q/E or right-drag to rotate'),
+      h('div', { class: 'help-hint wood', id: 'town-hint', style: 'bottom:auto;top:auto;bottom:96px' }, 'Click a building to visit it · drag to look around · wheel to zoom · Q/E or right-drag to rotate'),
       this.tip,
       h('div', { class: 'loading', id: 'town-loading', style: 'pointer-events:auto' }, h('div', { class: 'msg' }, `Entering ${def.name}...`)),
     );
     uiRoot().append(this.root);
+    setTimeout(() => document.getElementById('town-hint')?.remove(), 9000);
     this.refresh();
     void this.view.load().then(() => {
       this.ready = true;
