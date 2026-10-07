@@ -14,7 +14,7 @@ import type { TerrainSampler } from './terrain.ts';
 import { type Blueprint, church, cottagePrototype, hullFrame, mansion, market, PALETTES, type Palette, pier, shipyard, tavern, warehouse } from './town/buildings.ts';
 import { Kit } from './town/kit.ts';
 import { Vegetation } from './town/nature.ts';
-import { buildingFlag, detailTexture, material, mulberry } from './town/textures.ts';
+import { buildingFlag, detailTexture, material, mulberry, roadTexture } from './town/textures.ts';
 
 export type BuildingKind = 'market' | 'shipyard' | 'tavern' | 'harbour' | 'townhall' | 'church' | 'governor' | 'warehouse' | 'decor';
 
@@ -70,7 +70,8 @@ export class TownView {
   private raycaster = new THREE.Raycaster();
   private ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   private footprints: Footprint[] = [];
-  private streets: [number, number, number, number][] = [];
+  /** street segments in (u, v): u0, v0, u1, v1, paved (1) or dirt (0) */
+  private streets: [number, number, number, number, number][] = [];
   private fields: Footprint[] = [];
   private prevToneMapping: THREE.ToneMapping = THREE.NoToneMapping;
   private prevExposure = 1;
@@ -148,6 +149,7 @@ export class TownView {
     // yield so the loading message paints before the heavy work
     await new Promise((r) => setTimeout(r, 30));
     this.layout();
+    this.buildRoads();
     this.buildTerrain();
     this.buildWater();
     this.scene.add(this.shipGroup, this.construction);
@@ -209,7 +211,7 @@ export class TownView {
     const g = c.getContext('2d')!;
     const img = g.createImageData(N, N);
     const C = (h: number) => [(h >> 16) & 255, (h >> 8) & 255, h & 255];
-    const wet = C(0xa8966e), deepSand = C(0x8a8466), sand = C(0xcdb98c), grassA = C(0x7d9a44), grassB = C(0x5b7c31), dry = C(0xa8a25e), forest = C(0x4d6c2c), rock = C(0x8c8470);
+    const wet = C(0xa8966e), deepSand = C(0x8a8466), sand = C(0xcdb98c), grassA = C(0x77863a), grassB = C(0x56652b), dry = C(0x989650), forest = C(0x46552a), rock = C(0x8c8470);
     const col = [0, 0, 0];
     const lerp = (a: number[], b: number[], t: number) => { col[0] = a[0] + (b[0] - a[0]) * t; col[1] = a[1] + (b[1] - a[1]) * t; col[2] = a[2] + (b[2] - a[2]) * t; };
     const tmp = [0, 0, 0];
@@ -222,7 +224,7 @@ export class TownView {
         if (d < 0) {
           lerp(wet, deepSand, smooth(0, 90, -d));
         } else if (d < 26) {
-          lerp(sand, grassA, smooth(12 + n1 * 8, 26, d));
+          lerp(sand, grassA, smooth(3 + n1 * 8, 15, d));
         } else {
           lerp(grassA, grassB, n1);
           tmp[0] = col[0]; tmp[1] = col[1]; tmp[2] = col[2];
@@ -262,20 +264,18 @@ export class TownView {
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.filter = 'blur(1.5px)';
     g.lineCap = 'round';
+    // a soft worn verge under the road meshes
     for (const [u0, v0, u1, v1] of this.streets) {
       const [x0, z0] = this.frame(u0, v0), [x1, z1] = this.frame(u1, v1);
       const a = at(x0, z0), b = at(x1, z1);
-      g.strokeStyle = 'rgba(132, 106, 72, 0.9)';
-      g.lineWidth = 5.5 * s;
-      g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
-      g.strokeStyle = 'rgba(156, 128, 90, 0.6)';
-      g.lineWidth = 2.5 * s;
+      g.strokeStyle = 'rgba(150, 124, 88, 0.55)';
+      g.lineWidth = 8 * s;
       g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
     }
     // trodden earth around every building
     for (const fp of this.footprints) {
       place(fp);
-      g.fillStyle = 'rgba(138, 112, 76, 0.7)';
+      g.fillStyle = 'rgba(157, 128, 92, 0.72)';
       const r = Math.min(fp.hx, fp.hz) * 0.5;
       g.beginPath();
       g.roundRect(-fp.hx - fp.pad, -fp.hz - fp.pad, (fp.hx + fp.pad) * 2, (fp.hz + fp.pad) * 2, r);
@@ -287,6 +287,66 @@ export class TownView {
     t.colorSpace = THREE.SRGBColorSpace;
     t.anisotropy = 8;
     return t;
+  }
+
+  /** Roads as meshes laid on the terrain: worn dirt with ruts, or cobbles with kerbs. */
+  private buildRoads(): void {
+    const dirt: number[] = [], dirtUv: number[] = [], dirtIdx: number[] = [];
+    const k = new Kit();
+    const pos: number[] = [], uvs: number[] = [], idx: number[] = [];
+    for (const [u0, v0, u1, v1, paved] of this.streets) {
+      const len = Math.hypot(u1 - u0, v1 - v0);
+      if (len < 1) continue;
+      const du = (u1 - u0) / len, dv = (v1 - v0) / len;
+      const w = paved ? 7 : 6;
+      const n = Math.ceil(len / 2.5);
+      const P = paved ? pos : dirt, U = paved ? uvs : dirtUv, I = paved ? idx : dirtIdx;
+      const base = P.length / 3;
+      for (let i = 0; i <= n; i++) {
+        const l = (len * i) / n;
+        for (let j = 0; j <= 4; j++) {
+          const o = (j / 4 - 0.5) * w;
+          const [x, z] = this.frame(u0 + du * l - dv * o, v0 + dv * l + du * o);
+          // follow the ground, never dipping under the quay or into the sea
+          const y = Math.max(paved ? 1.5 : 0.3, this.height(x, z)) + (paved ? 0.12 : 0.07);
+          P.push(x, y, z);
+          if (paved) U.push(o, l); else U.push(j / 4, l / 24);
+        }
+      }
+      for (let i = 0; i < n; i++) for (let j = 0; j < 4; j++) {
+        const a = base + i * 5 + j, b = a + 5;
+        I.push(a, a + 1, b, b, a + 1, b + 1);
+      }
+      if (paved) {
+        // kerbstones along both edges
+        const [ax, az] = this.frame(u0, v0), [bx, bz] = this.frame(u1, v1);
+        const ry = Math.atan2(-(bz - az), bx - ax);
+        for (let l = 0; l < len; l += 2.5) for (const sd of [-1, 1]) {
+          const [x, z] = this.frame(u0 + du * (l + 1.25) - dv * sd * (w / 2 + 0.15), v0 + dv * (l + 1.25) + du * sd * (w / 2 + 0.15));
+          const y = Math.max(1.5, this.height(x, z));
+          k.box('limestone|e8e0cc', 2.45, 0.45, 0.35, x, y - 0.05, z, ry);
+        }
+      }
+    }
+    const mesh = (p: number[], u: number[], ix: number[], mat: THREE.Material) => {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
+      g.setAttribute('uv', new THREE.Float32BufferAttribute(u, 2));
+      g.setIndex(ix);
+      g.computeVertexNormals();
+      const m = new THREE.Mesh(g, mat);
+      m.receiveShadow = true;
+      this.scene.add(m);
+    };
+    const tex = roadTexture();
+    const roadMat = new THREE.MeshStandardMaterial({ map: tex.map, bumpMap: tex.bump, bumpScale: 2, roughness: 0.95, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+    if (dirt.length) mesh(dirt, dirtUv, dirtIdx, roadMat);
+    const cob = (material('cobble') as THREE.MeshStandardMaterial).clone();
+    cob.polygonOffset = true;
+    cob.polygonOffsetFactor = -3;
+    cob.polygonOffsetUnits = -3;
+    if (pos.length) mesh(pos, uvs, idx, cob);
+    this.scene.add(k.build());
   }
 
   private buildWater(): void {
@@ -458,6 +518,8 @@ export class TownView {
       const [x2, z2] = this.frame(u + step / 2, v - 3.3);
       k.box('limestone|f2ead8', step + 0.15, 0.3, 0.7, x2, 1.25, z2, this.seaward);
       this.reserve(u + step / 2, v + 2, 7);
+      // keep the waterfront street clear of buildings
+      this.reserve(u + step / 2, this.shoreV(0) + 8, 5);
     }
     // bollards along the edge
     for (let u = u0 + 6; u < u1; u += 14) {
@@ -467,7 +529,7 @@ export class TownView {
     }
     const g = k.build();
     this.scene.add(g);
-    this.streets.push([u0, this.shoreV(0) + 7, u1, this.shoreV(0) + 7]);
+    this.streets.push([u0, this.shoreV(0) + 8, u1, this.shoreV(0) + 8, 1]);
   }
 
   private layout(): void {
@@ -510,6 +572,10 @@ export class TownView {
     if (this.town.rank !== 'colony') this.place('governor', "Governor's house", mansion(pal, true), 0, mv - this.shoreV(0) + 50, 0, false, 8);
     else this.place('townhall', 'Town hall', mansion(pal, false), 0, mv - this.shoreV(0) + 46, 0, false, 4);
     this.place('church', 'Church', church(pal), -68, mv - this.shoreV(-68) + 22, -Math.PI / 2, false, 5);
+
+    // ---- a paved avenue from the pier up to the square and on to the seat of government
+    this.streets.push([0, shore + 12, 0, mv - 15, 1], [0, mv + 15, 0, mv + 30, 1], [-21, mv + 18, 21, mv + 18, 1]);
+    for (let v = shore + 12; v < mv; v += 6) this.reserve(0, v, 5);
 
     // ---- cottages along a street grid
     this.cottages(big, mv);
@@ -563,10 +629,9 @@ export class TownView {
       placed++;
     }
     // streets in front of each row of houses, and lanes up from the waterfront
-    for (const [v, [u0, u1]] of usedRows) this.streets.push([u0 - 8, v - 10, u1 + 8, v - 10]);
+    for (const [v, [u0, u1]] of usedRows) this.streets.push([u0 - 8, v - 10, u1 + 8, v - 10, 0]);
     const vmax = Math.max(...[...usedRows.keys()], mv + 60);
-    for (const u of [-colGap * 4.5, -colGap * 1.5, colGap * 1.5, colGap * 4.5]) this.streets.push([u, shore + 8, u, vmax]);
-    this.streets.push([-30, mv + 30, 30, mv + 30]);
+    for (const u of [-colGap * 4.5, -colGap * 1.5, colGap * 1.5, colGap * 4.5]) this.streets.push([u, shore + 12, u, vmax, 0]);
     for (const P of protos) {
       if (!P.mats.length) continue;
       for (const [key, geo] of P.geos) {
@@ -614,7 +679,7 @@ export class TownView {
     const onStreet = (u: number, v: number) => this.streets.some(([u0, v0, u1, v1]) => {
       const dx = u1 - u0, dv = v1 - v0;
       const t = Math.max(0, Math.min(1, ((u - u0) * dx + (v - v0) * dv) / (dx * dx + dv * dv || 1)));
-      return Math.hypot(u - (u0 + dx * t), v - (v0 + dv * t)) < 4;
+      return Math.hypot(u - (u0 + dx * t), v - (v0 + dv * t)) < 4.5;
     });
     const tryPut = (n: number, fn: (x: number, y: number, z: number, d: number, u: number, v: number) => boolean) => {
       for (let k = 0; k < n; k++) {
@@ -631,7 +696,8 @@ export class TownView {
       const want = d < 70 ? 0.22 : inTown ? 0.06 : 0.035;
       if (rnd() > want) return false;
       if (!this.clearOfBuildings(x, z, 2.5) || onStreet(u, v) || !this.free(u, v, 1.5, 0)) return false;
-      if (d < 80 || rnd() < 0.45) veg.palm(x, y, z);
+      if (d < 80) { if (rnd() < 0.25) veg.royal(x, y, z); else veg.palm(x, y, z); }
+      else if (rnd() < 0.45) { if (rnd() < 0.4) veg.royal(x, y, z); else veg.palm(x, y, z); }
       else veg.tree(x, y, z);
       if (!inTown && rnd() < 0.5) this.reserve(u, v, 3);
       return true;
@@ -648,12 +714,61 @@ export class TownView {
       veg.bush(x, y, z);
       return true;
     });
-    tryPut(6000, (x, y, z, _d, u, v) => {
+    tryPut(4000, (x, y, z, _d, u, v) => {
       if (!this.clearOfBuildings(x, z, 0.3) || onStreet(u, v)) return false;
       if (Math.abs(u) < townR && v < shore + townR && rnd() < 0.5) return false;
       veg.tuft(x, y, z);
       return true;
     });
+    // lush clumps of grass and ferns in the open, and rocks here and there
+    tryPut(7000, (x, y, z, d, u, v) => {
+      if (d < 14 || !this.clearOfBuildings(x, z, 0.6) || onStreet(u, v)) return false;
+      const r = rnd();
+      if (r < 0.62) veg.clump(x, y, z); else if (r < 0.9) veg.fern(x, y, z); else veg.rock(x, y, z);
+      return true;
+    });
+    // ground cover hugging the buildings, as in the town sheets
+    const at = (f: Footprint, lx: number, lz: number): [number, number] => {
+      const cs = Math.cos(f.rot), sn = Math.sin(f.rot);
+      return [f.x + lx * cs + lz * sn, f.z - lx * sn + lz * cs];
+    };
+    for (const f of this.footprints) {
+      const n = 7 + Math.floor(rnd() * 7);
+      for (let i = 0; i < n; i++) {
+        const side = Math.floor(rnd() * 4);
+        const t = rnd() * 2 - 1;
+        const off = 0.6 + rnd() * 1.6;
+        const lx = side < 2 ? t * f.hx : (side === 2 ? 1 : -1) * (f.hx + off);
+        const lz = side >= 2 ? t * f.hz : (side === 0 ? 1 : -1) * (f.hz + off);
+        if (side === 0 && Math.abs(lx) < f.hx * 0.4) continue; // keep the front door clear
+        const [x, z] = at(f, lx, lz);
+        if (this.coast(x, z) < 4 || !this.clearOfBuildings(x, z, 0.2)) continue;
+        const y = this.height(x, z);
+        const r = rnd();
+        if (r < 0.5) veg.clump(x, y, z); else if (r < 0.8) veg.fern(x, y, z); else if (r < 0.9) veg.rock(x, y, z); else veg.bush(x, y, z);
+      }
+    }
+    // grass and stones along the dirt road verges, royal palms lining the avenue
+    for (const [u0, v0, u1, v1, paved] of this.streets) {
+      const len = Math.hypot(u1 - u0, v1 - v0);
+      const du = (u1 - u0) / len, dv = (v1 - v0) / len;
+      if (paved) {
+        if (u0 === u1 && u0 === 0) for (let l = 10; l < len - 4; l += 16) for (const sd of [-1, 1]) {
+          const [x, z] = this.frame(u0 + sd * 6.5, v0 + dv * l);
+          if (this.clearOfBuildings(x, z, 1)) veg.royal(x, this.height(x, z), z);
+        }
+        continue;
+      }
+      for (let l = 0; l < len; l += 1.5 + rnd() * 2.5) for (const sd of [-1, 1]) {
+        if (rnd() < 0.3) continue;
+        const o = 3.3 + rnd() * 1.4;
+        const [x, z] = this.frame(u0 + du * l - dv * sd * o, v0 + dv * l + du * sd * o);
+        if (this.coast(x, z) < 4 || !this.clearOfBuildings(x, z, 0.3)) continue;
+        const y = this.height(x, z);
+        const r = rnd();
+        if (r < 0.6) veg.clump(x, y, z); else if (r < 0.75) veg.fern(x, y, z); else veg.rock(x, y, z);
+      }
+    }
     this.scene.add(veg.build());
   }
 

@@ -368,10 +368,46 @@ function noiseTex(a: RGB, b: RGB, p: number, contrast = 1): (seed: number) => Pi
   };
 }
 
+/** Square setts laid on the diagonal, with moss in the joints (town-centre paving). */
+function setts(rows: number, per: number, base: RGB[], joint: RGB, moss: RGB): (seed: number) => PixelFn {
+  return (seed) => {
+    const nz = tileNoise(seed);
+    return (u, v) => {
+      const a = (u + v) * rows, b = (v - u) * per;
+      const r = Math.floor(a);
+      const t = a - r;
+      const rm = ((r % (rows * 2)) + rows * 2) % (rows * 2);
+      const sb = b + hash2(rm, 7);
+      const i = Math.floor(sb);
+      const f = sb - i;
+      const im = ((i % (per * 2)) + per * 2) % (per * 2);
+      const id = hash2(rm, im);
+      // rounded-square distance in sett units
+      const px = Math.abs(t - 0.5), py = Math.abs(f - 0.5);
+      const cr = 0.18, hw = 0.5 - 0.07 - id * 0.03;
+      const qx = Math.max(0, px - hw + cr), qy = Math.max(0, py - hw + cr);
+      const d = Math.hypot(qx, qy) - cr + (nz.n(u, v, 120) - 0.5) * 0.08;
+      const n = nz.fbm(u, v, 48, 3);
+      if (d > 0) {
+        const m = smooth(0.35, 0.65, nz.fbm(u + 0.2, v, 10, 3));
+        return [mix(mul(joint, 0.8 + 0.4 * n), moss, m), 0.05];
+      }
+      let c = mix(base[Math.floor(id * base.length)], base[Math.floor(hash2(im, rm + 3) * base.length)], 0.4);
+      c = mul(c, 0.82 + 0.3 * n);
+      const dome = 1 - (px * px + py * py) * 2.2;
+      c = mul(c, 0.82 + 0.28 * dome);
+      // a little moss creeping onto the stone edges
+      const edgeMoss = smooth(-0.06, 0, d) * smooth(0.45, 0.7, nz.fbm(u, v + 0.4, 12, 3));
+      c = mix(c, moss, edgeMoss * 0.6);
+      return [c, 0.35 + 0.6 * dome];
+    };
+  };
+}
+
 function foliage(): (seed: number) => PixelFn {
   return (seed) => {
     const nz = tileNoise(seed);
-    const pal: RGB[] = [hex(0x3e6b2a), hex(0x4f7d31), hex(0x2f5522), hex(0x5d8a3a)];
+    const pal: RGB[] = [hex(0x3c4e24), hex(0x4f5f30), hex(0x2c3a1a), hex(0x627238), hex(0x556a2a)];
     return (u, v) => {
       const gx = u * 24, gy = v * 24;
       const ix = Math.floor(gx), iy = Math.floor(gy);
@@ -382,7 +418,7 @@ function foliage(): (seed: number) => PixelFn {
         const d = Math.hypot(gx - cx - hash2(wx, wy), (gy - cy - hash2(wy, wx + 3)) * 1.6);
         if (d < best) { best = d; id = wx * 31 + wy; }
       }
-      let c = mul(pal[id % 4], 0.75 + 0.45 * hash2(id, 9));
+      let c = mul(pal[id % 5], 0.75 + 0.5 * hash2(id, 9));
       c = mul(c, 1.1 - best * 0.6);
       const big = nz.fbm(u, v, 4, 3);
       c = mul(c, 0.75 + 0.5 * big);
@@ -457,13 +493,15 @@ const DEFS: Record<string, TexDef> = {
   rubble: { size: 2, paint: ashlar(9, 0.08, 0.2, hex(0xb3a890), hex(0x857c6a), 0.35, 1.6), bump: 2.2 },
   quay: { size: 4, paint: ashlar(6, 0.15, 0.3, hex(0x9b998a), hex(0x6a6a5e), 0.25, 1.2), bump: 2 },
   brick: { size: 1.2, paint: ashlar(16, 0.18, 0.2, hex(0x9a4f38), hex(0xb7ab96), 0.3, 0.4), bump: 1.4 },
-  cobble: { size: 3, paint: cobbles(0.06, [hex(0x9c9384), hex(0x8a8274), hex(0xa79b82), hex(0x7d776c)], hex(0x6a5a44)), bump: 2.4 },
+  cobble: { size: 3, paint: setts(14, 18, [hex(0x8d856c), hex(0xa9a48e), hex(0x7a7460), hex(0x9a927a), hex(0xb0a88e)], hex(0x4e4a32), hex(0x66752f)), bump: 2.6, rough: 0.7 },
+  roundCobble: { size: 3, paint: cobbles(0.06, [hex(0x9c9384), hex(0x8a8274), hex(0xa79b82), hex(0x7d776c)], hex(0x6a5a44)), bump: 2.4 },
   dirt: { size: 6, paint: noiseTex(hex(0xa8916a), hex(0x8a7352), 12, 1.6), bump: 1 },
   iron: { size: 1, paint: iron(), bump: 0.4, rough: 0.6, metal: 0.4 },
   glass: { size: 1, paint: panes(0.24, 0.3, hex(0xece8de), hex(0x33424c), false), rough: 0.25, bump: 0.6 },
   glassDark: { size: 1, paint: panes(0.24, 0.3, hex(0x4a3a2a), hex(0x2c3a42), false), rough: 0.25, bump: 0.6 },
   leaded: { size: 1, paint: panes(0.22, 0.22, hex(0x3a3a38), hex(0x5c7480), true), rough: 0.3, bump: 0.6 },
   bark: { size: 1.2, paint: bark(), bump: 2 },
+  royalTrunk: { size: 1.5, paint: noiseTex(hex(0xc9c5b9), hex(0x8a857a), 24, 1.3), bump: 0.8 },
   foliage: { size: 3, paint: foliage(), bump: 2, rough: 0.85 },
   hedge: { size: 1.5, paint: foliage(), bump: 2.5, rough: 0.9 },
   canvasRed: { size: 2, paint: stripes(hex(0xb8432f), hex(0xe9dfc8), 8), bump: 0.3 },
@@ -564,17 +602,17 @@ export function frondTexture(): THREE.CanvasTexture {
   c.height = 512;
   const g = c.getContext('2d')!;
   const rnd = mulberry(77);
-  const greens = ['#4d7a2c', '#5e8c34', '#3f6a26', '#6f9a3c', '#557f2e'];
-  for (let i = 0; i < 70; i++) {
-    const t = i / 70;
-    const y = 12 + t * 480;
-    const len = 58 * Math.sin(Math.PI * Math.min(1, t * 1.1 + 0.08)) * (0.8 + rnd() * 0.3);
+  const greens = ['#3f4f1c', '#55652a', '#6b7a35', '#7d8a42', '#4a5a22', '#8f9a4a'];
+  for (let i = 0; i < 110; i++) {
+    const t = i / 110;
+    const y = 10 + t * 485;
+    const len = 60 * Math.sin(Math.PI * Math.min(1, t * 1.1 + 0.08)) * (0.75 + rnd() * 0.35);
     for (const side of [-1, 1]) {
       g.fillStyle = greens[Math.floor(rnd() * greens.length)];
       g.beginPath();
       g.moveTo(64, y);
-      g.quadraticCurveTo(64 + side * len * 0.5, y + 6, 64 + side * len, y + 22 + len * 0.25);
-      g.quadraticCurveTo(64 + side * len * 0.5, y + 10, 64, y + 5);
+      g.quadraticCurveTo(64 + side * len * 0.5, y + 4, 64 + side * len, y + 26 + len * 0.35);
+      g.quadraticCurveTo(64 + side * len * 0.5, y + 7, 64, y + 3.2);
       g.fill();
     }
   }
@@ -596,11 +634,11 @@ export function tuftTexture(): THREE.CanvasTexture {
   c.width = c.height = 256;
   const g = c.getContext('2d')!;
   const rnd = mulberry(91);
-  const greens = ['#6f9a3c', '#58822f', '#86a84a', '#4a7228', '#9aae5a'];
-  for (let i = 0; i < 90; i++) {
-    const x = 20 + rnd() * 216;
-    const h = 90 + rnd() * 150;
-    const lean = (rnd() - 0.5) * 120;
+  const greens = ['#424c27', '#55602c', '#646f32', '#7a8438', '#888e38', '#4f5f2a', '#9aa048'];
+  for (let i = 0; i < 170; i++) {
+    const x = 16 + rnd() * 224;
+    const h = 70 + rnd() * 175;
+    const lean = (rnd() - 0.5) * 140;
     g.fillStyle = greens[Math.floor(rnd() * greens.length)];
     g.beginPath();
     g.moveTo(x - 3, 256);
@@ -611,6 +649,78 @@ export function tuftTexture(): THREE.CanvasTexture {
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
+}
+
+/** Worn dirt road: wheel ruts, footprints, puddles and pebbles; u across (alpha at the edges), v along. */
+export function roadTexture(): { map: THREE.CanvasTexture; bump: THREE.CanvasTexture } {
+  const W = 256, H = 1024;
+  const col = document.createElement('canvas'), hgt = document.createElement('canvas');
+  col.width = hgt.width = W;
+  col.height = hgt.height = H;
+  const ci = col.getContext('2d')!.createImageData(W, H), hi = hgt.getContext('2d')!.createImageData(W, H);
+  const nz = tileNoise(4242);
+  const rnd = mulberry(4243);
+  const light = hex(0xb59668), mid = hex(0x9d805c), dark = hex(0x846a4f), wet = hex(0x7f7c70), pebble = hex(0xc8bca4);
+  const puddles: [number, number, number, number][] = [];
+  for (let i = 0; i < 3; i++) puddles.push([rnd() < 0.5 ? 0.34 : 0.66, rnd(), 0.05 + rnd() * 0.04, 0.025 + rnd() * 0.02]);
+  const prints: [number, number][] = [];
+  for (let i = 0; i < 70; i++) prints.push([0.2 + rnd() * 0.6, rnd()]);
+  for (let y = 0; y < H; y++) {
+    const v = y / H;
+    for (let x = 0; x < W; x++) {
+      const u = x / W;
+      const n = nz.fbm(u, v, 8, 5);
+      let c = n < 0.5 ? mix(dark, mid, n * 2) : mix(mid, light, (n - 0.5) * 2);
+      let h = 0.5 + 0.2 * n;
+      // two wheel tracks, wobbling along the road
+      for (const base of [0.34, 0.66]) {
+        const cx = base + 0.025 * Math.sin(v * Math.PI * 4 + base * 9) + 0.01 * Math.sin(v * Math.PI * 14);
+        const d = (u - cx) / 0.035;
+        const g = Math.exp(-d * d);
+        c = mix(c, mul(dark, 0.78), g * 0.7);
+        h -= g * 0.32;
+        const ridge = Math.exp(-((Math.abs(d) - 1.6) ** 2) * 2);
+        c = mix(c, light, ridge * 0.25);
+        h += ridge * 0.12;
+        if (Math.abs(Math.abs(d) - 0.55) < 0.07) c = mul(c, 0.85);
+      }
+      // footprints and hoof marks
+      for (const [px, py] of prints) {
+        let dy = Math.abs(v - py);
+        dy = Math.min(dy, 1 - dy);
+        const e = ((u - px) / 0.012) ** 2 + (dy / 0.006) ** 2;
+        if (e < 1) { c = mul(c, 0.82); h -= 0.08 * (1 - e); }
+      }
+      // pebbles
+      if (nz.n(u, v, 200) > 0.86 && nz.n(u + 0.5, v, 150) > 0.6) { c = mix(c, pebble, 0.7); h += 0.25; }
+      // puddles in the ruts
+      for (const [px, py, rx, ry] of puddles) {
+        let dy = Math.abs(v - py);
+        dy = Math.min(dy, 1 - dy);
+        const e = ((u - px) / rx) ** 2 + (dy / ry) ** 2 + (nz.n(u, v, 64) - 0.5) * 0.5;
+        if (e < 1) { c = mix(wet, hex(0x9a9e9a), smooth(0.2, 0.9, 1 - e) * 0.4); h = 0.22; }
+        else if (e < 1.5) { c = mul(c, 0.8); h -= 0.05; }
+      }
+      // ragged grassy edges fade out
+      const edge = Math.min(u, 1 - u);
+      const a = smooth(0.02, 0.17, edge + (nz.fbm(u, v, 16, 3) - 0.5) * 0.12);
+      const o = (y * W + x) * 4;
+      ci.data[o] = c[0]; ci.data[o + 1] = c[1]; ci.data[o + 2] = c[2]; ci.data[o + 3] = a * 255;
+      const hv = Math.max(0, Math.min(255, h * 255));
+      hi.data[o] = hi.data[o + 1] = hi.data[o + 2] = hv; hi.data[o + 3] = 255;
+    }
+  }
+  col.getContext('2d')!.putImageData(ci, 0, 0);
+  hgt.getContext('2d')!.putImageData(hi, 0, 0);
+  const mk = (cv: HTMLCanvasElement, srgb: boolean) => {
+    const t = new THREE.CanvasTexture(cv);
+    t.wrapS = THREE.ClampToEdgeWrapping;
+    t.wrapT = THREE.RepeatWrapping;
+    t.anisotropy = 8;
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  return { map: mk(col, true), bump: mk(hgt, false) };
 }
 
 /** Fine greyscale noise used to add close-up detail to the ground. */
